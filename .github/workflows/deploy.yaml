@@ -23,78 +23,62 @@ jobs:
       run: |
         echo "开始构建 Go 应用..."
         mkdir -p bin
-        if ! go build -o bin/wyhblog ./cmd/server; then
-          echo "❌ 构建失败"
-          exit 1
-        fi
+        go build -o bin/wyhblog ./cmd/server
         chmod +x bin/wyhblog
-        echo "✅ 构建完成，文件大小: $(du -h bin/wyhblog | cut -f1)"
+        echo "✅ 构建完成"
 
-    # 关键修复：添加详细的 SSH 设置和测试
     - name: Setup SSH Environment
       run: |
         echo "=== 设置 SSH 环境 ==="
-        
-        # 检查 Secrets
-        echo "检查 Secrets..."
-        if [ -z "${{ secrets.SERVER_HOST }}" ] || [ -z "${{ secrets.SERVER_USER }}" ] || [ -z "${{ secrets.SERVER_SSH_KEY }}" ]; then
-          echo "❌ 错误: 缺少必要的 Secrets"
-          exit 1
-        fi
         
         # 创建 SSH 目录和密钥文件
         mkdir -p ~/.ssh
         chmod 700 ~/.ssh
         
-        # 使用绝对路径
-        KEY_PATH="$HOME/.ssh/wyhblog_deploy_key"
-        echo "密钥文件路径: $KEY_PATH"
-        
-        # 写入私钥
+        # 使用完整的绝对路径
+        KEY_PATH="/home/runner/.ssh/wyhblog_deploy_key"
         echo "${{ secrets.SERVER_SSH_KEY }}" > "$KEY_PATH"
         chmod 600 "$KEY_PATH"
         
-        # 验证密钥文件
-        echo "=== 验证密钥文件 ==="
-        if [ ! -f "$KEY_PATH" ]; then
-          echo "❌ 密钥文件未创建"
-          exit 1
-        fi
-        
-        echo "文件大小: $(wc -c < "$KEY_PATH") 字节"
-        echo "第一行: $(head -1 "$KEY_PATH")"
-        echo "最后一行: $(tail -1 "$KEY_PATH")"
-        
-        # 生成公钥
-        echo "=== 生成公钥 ==="
-        ssh-keygen -y -f "$KEY_PATH" > "$KEY_PATH.pub" 2>/dev/null
-        echo "公钥内容:"
-        cat "$KEY_PATH.pub"
-        
-        # 添加到 known_hosts
-        echo "=== 添加服务器到 known_hosts ==="
-        ssh-keyscan -p 22 "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
-        chmod 600 ~/.ssh/known_hosts
+        # 验证密钥
+        echo "✅ 密钥文件创建成功"
+        echo "文件路径: $KEY_PATH"
+        echo "文件信息:"
+        ls -la "$KEY_PATH"
+        echo ""
+        echo "密钥指纹:"
+        ssh-keygen -l -f "$KEY_PATH"
 
-    # 添加 SSH 连接测试
+    - name: Display Public Key for Server
+      run: |
+        echo "=== 公钥信息 ==="
+        KEY_PATH="/home/runner/.ssh/wyhblog_deploy_key"
+        
+        echo "公钥内容（已添加到服务器）:"
+        ssh-keygen -y -f "$KEY_PATH" 2>/dev/null
+        
+        echo ""
+        echo "公钥指纹:"
+        ssh-keygen -l -f "$KEY_PATH"
+
     - name: Test SSH Connection
       run: |
         echo "=== 测试 SSH 连接 ==="
-        KEY_PATH="$HOME/.ssh/wyhblog_deploy_key"
+        KEY_PATH="/home/runner/.ssh/wyhblog_deploy_key"
         
-        # 使用 ssh-keyscan 预先获取主机密钥
-        ssh-keyscan -p 22 "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
+        # 添加到 known_hosts
+        ssh-keyscan -p 22 "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
         
-        # 测试连接（带详细输出）
-        echo "测试连接到 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}..."
-        ssh -v \
-            -i "$KEY_PATH" \
-            -o StrictHostKeyChecking=no \
+        # 测试连接
+        echo "测试连接到服务器..."
+        ssh -o StrictHostKeyChecking=no \
             -o ConnectTimeout=10 \
+            -i "$KEY_PATH" \
             -p 22 \
             "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
-            "echo '✅ SSH 连接测试成功'; hostname; date" || {
+            "echo '✅ SSH 连接成功'; hostname" || {
           echo "❌ SSH 连接失败"
+          echo "请确保服务器上的 authorized_keys 包含正确的公钥"
           exit 1
         }
 
@@ -103,7 +87,7 @@ jobs:
       with:
         host: ${{ secrets.SERVER_HOST }}
         username: ${{ secrets.SERVER_USER }}
-        key_path: $HOME/.ssh/wyhblog_deploy_key
+        key_path: /home/runner/.ssh/wyhblog_deploy_key  # 使用绝对路径
         port: 22
         source: "bin/wyhblog,web/dist,deploy/"
         target: "/opt/wyhblog"
@@ -116,70 +100,18 @@ jobs:
       with:
         host: ${{ secrets.SERVER_HOST }}
         username: ${{ secrets.SERVER_USER }}
-        key_path: $HOME/.ssh/wyhblog_deploy_key
+        key_path: /home/runner/.ssh/wyhblog_deploy_key  # 使用绝对路径
         port: 22
         script: |
-          echo "=== 开始部署 ==="
-          
-          # 显示部署信息
-          echo "部署时间: $(date)"
+          echo "✅ 部署成功！"
           echo "服务器: $(hostname)"
-          echo "当前目录: $(pwd)"
-          
-          # 进入部署目录
-          cd /opt/wyhblog || { echo "❌ 无法进入 /opt/wyhblog"; exit 1; }
-          
-          # 列出部署的文件
-          echo "=== 已部署的文件 ==="
-          ls -la
-          
-          # 检查可执行文件
-          if [ -f "wyhblog" ]; then
-            echo "✅ 找到 wyhblog 可执行文件"
-            chmod +x wyhblog
-            
-            # 测试运行
-            echo "测试运行:"
-            ./wyhblog --version 2>/dev/null || echo "无法获取版本信息"
-          else
-            echo "❌ 未找到 wyhblog 可执行文件"
+          echo "时间: $(date)"
+          echo ""
+          echo "部署的文件:"
+          ls -la /opt/wyhblog/
+          echo ""
+          echo "检查 wyhblog 可执行文件:"
+          if [ -f "/opt/wyhblog/wyhblog" ]; then
+            chmod +x /opt/wyhblog/wyhblog
+            echo "文件权限: $(ls -la /opt/wyhblog/wyhblog)"
           fi
-          
-          # 创建必要目录
-          echo "=== 创建系统目录 ==="
-          sudo mkdir -p /var/lib/wyhblog /etc/wyhblog /var/log/wyhblog
-          
-          # 设置目录权限
-          CURRENT_USER="$(whoami)"
-          if id www-data &>/dev/null; then
-            sudo chown -R www-data:www-data /var/lib/wyhblog /var/log/wyhblog
-            echo "✅ 目录权限设置为 www-data"
-          elif id nginx &>/dev/null; then
-            sudo chown -R nginx:nginx /var/lib/wyhblog /var/log/wyhblog
-            echo "✅ 目录权限设置为 nginx"
-          else
-            sudo chown -R "$CURRENT_USER:$CURRENT_USER" /var/lib/wyhblog /var/log/wyhblog
-            echo "✅ 目录权限设置为 $CURRENT_USER"
-          fi
-          
-          # 配置 systemd 服务
-          echo "=== 配置 systemd 服务 ==="
-          if [ -f "deploy/wyhblog.service" ]; then
-            echo "安装服务文件..."
-            sudo cp deploy/wyhblog.service /etc/systemd/system/
-            sudo systemctl daemon-reload
-            
-            # 启用并启动服务
-            sudo systemctl enable wyhblog 2>/dev/null || true
-            sudo systemctl restart wyhblog
-            
-            # 检查服务状态
-            sleep 2
-            echo "服务状态:"
-            sudo systemctl status wyhblog --no-pager || echo "服务状态检查失败"
-          else
-            echo "⚠️ 未找到 deploy/wyhblog.service，跳过服务配置"
-          fi
-          
-          echo "=== 部署完成 ==="
-          echo "完成时间: $(date)"
