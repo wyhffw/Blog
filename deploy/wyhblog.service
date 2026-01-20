@@ -1,0 +1,25 @@
+[Unit]
+Description=wyhblog (Go blog)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/wyhblog
+EnvironmentFile=-/etc/wyhblog/wyhblog.env
+Environment=ADDR=127.0.0.1:8080
+Environment=DATA_DIR=/var/lib/wyhblog
+Environment=PUBLIC_DIR=/opt/wyhblog/web/dist
+ExecStart=/opt/wyhblog/bin/wyhblog
+Restart=always
+RestartSec=2
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/wyhblog
+
+[Install]
+WantedBy=multi-user.target
