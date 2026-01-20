@@ -1,4 +1,4 @@
-name: Deploy to Server - Ultimate Solution
+name: Deploy to Server
 
 on:
   push:
@@ -11,163 +11,61 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+    # 1. 检出代码
     - name: Checkout code
       uses: actions/checkout@v4
 
+    # 2. 设置 Go 环境
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
         go-version: '1.22'
 
+    # 3. 构建应用
     - name: Build application
       run: |
-        echo "开始构建 Go 应用..."
         mkdir -p bin
         go build -o bin/wyhblog ./cmd/server
         chmod +x bin/wyhblog
         echo "✅ 构建完成"
 
-    # 终极解决方案：使用 env 和 key 参数，而不是 key_path
-    - name: Create SSH Key File for Action
-      id: create_ssh_key
-      run: |
-        echo "=== 创建 Action 所需的 SSH 密钥 ==="
-        
-        # 在 /tmp 目录创建密钥文件，确保路径稳定
-        SSH_KEY_FILE="/tmp/wyhblog_deploy_key_$(date +%s)"
-        
-        # 写入私钥
-        echo "${{ secrets.SERVER_SSH_KEY }}" > "$SSH_KEY_FILE"
-        
-        # 验证文件
-        if [ ! -s "$SSH_KEY_FILE" ]; then
-          echo "❌ 错误：密钥文件为空"
-          exit 1
-        fi
-        
-        # 设置权限
-        chmod 600 "$SSH_KEY_FILE"
-        
-        # 验证密钥格式
-        if ssh-keygen -l -f "$SSH_KEY_FILE" >/dev/null 2>&1; then
-          echo "✅ 密钥格式正确"
-          echo "密钥指纹:"
-          ssh-keygen -l -f "$SSH_KEY_FILE"
-        else
-          echo "❌ 密钥格式错误"
-          exit 1
-        fi
-        
-        # 将密钥内容设置为环境变量（用于 key 参数）
-        SSH_KEY_CONTENT=$(cat "$SSH_KEY_FILE")
-        echo "SSH_KEY_CONTENT<<EOF" >> $GITHUB_ENV
-        echo "$SSH_KEY_CONTENT" >> $GITHUB_ENV
-        echo "EOF" >> $GITHUB_ENV
-        
-        echo "✅ SSH 密钥已准备"
-
-    # 方法1：使用 key 参数（而不是 key_path）
-    - name: Deploy files to server (Method 1 - using key)
-      uses: appleboy/scp-action@v0.1.7
-      env:
-        SSH_KEY: ${{ env.SSH_KEY_CONTENT }}
-      with:
-        host: ${{ secrets.SERVER_HOST }}
-        username: ${{ secrets.SERVER_USER }}
-        key: ${{ env.SSH_KEY_CONTENT }}  # 直接传递密钥内容
-        port: 22
-        source: "bin/wyhblog,web/dist,deploy/"
-        target: "/opt/wyhblog"
-        strip_components: 0
-        overwrite: true
-        debug: true
-
-    # 如果方法1失败，使用方法2
-    - name: Deploy files to server (Method 2 - backup)
-      if: failure()
-      uses: appleboy/scp-action@v0.1.7
-      with:
-        host: ${{ secrets.SERVER_HOST }}
-        username: ${{ secrets.SERVER_USER }}
-        key: ${{ secrets.SERVER_SSH_KEY }}  # 直接使用 secret
-        port: 22
-        source: "bin/wyhblog,web/dist,deploy/"
-        target: "/opt/wyhblog"
-        strip_components: 0
-        overwrite: true
-        debug: true
-
-    # 方法3：使用不同的 Action
-    - name: Deploy files to server (Method 3 - alternative action)
-      if: failure()
+    # 4. 使用 rsync 部署文件 ⬅️ 这是你要添加的步骤
+    - name: Deploy files with rsync
       uses: burnett01/rsync-deployments@7.0.1
       with:
-        switches: -avzr --delete
-        path: bin/wyhblog,web/dist,deploy/
+        switches: -avz --delete
+        path: |
+          bin/
+          web/
+          deploy/
+          go.mod
+          go.sum
+          .env.example
+          config.yaml
+          docker-compose.yml
+          README.md
         remote_path: /opt/wyhblog/
         remote_host: ${{ secrets.SERVER_HOST }}
         remote_user: ${{ secrets.SERVER_USER }}
         remote_key: ${{ secrets.SERVER_SSH_KEY }}
 
+    # 5. 在服务器上执行部署脚本
     - name: Execute deployment script
       uses: appleboy/ssh-action@v1.0.3
       with:
         host: ${{ secrets.SERVER_HOST }}
         username: ${{ secrets.SERVER_USER }}
-        key: ${{ secrets.SERVER_SSH_KEY }}  # 直接使用 secret
+        key: ${{ secrets.SERVER_SSH_KEY }}
         port: 22
         script: |
-          echo "🎉 开始部署脚本执行"
-          echo "时间: $(date)"
-          echo "服务器: $(hostname)"
-          
-          # 检查部署文件
+          echo "开始部署..."
           cd /opt/wyhblog
-          echo "部署目录内容:"
-          ls -la
           
-          # 确保文件可执行
-          if [ -f "wyhblog" ]; then
-            chmod +x wyhblog
-            echo "✅ wyhblog 已设置为可执行"
-          fi
+          # 确保可执行权限
+          chmod +x bin/wyhblog 2>/dev/null || true
           
-          # 创建必要的系统目录
-          echo "创建系统目录..."
-          sudo mkdir -p /var/lib/wyhblog /etc/wyhblog /var/log/wyhblog 2>/dev/null || true
+          # 重启服务
+          sudo systemctl restart wyhblog 2>/dev/null || echo "服务重启失败，可能是首次部署"
           
-          # 设置权限
-          echo "设置目录权限..."
-          if id www-data &>/dev/null; then
-            sudo chown -R www-data:www-data /var/lib/wyhblog /var/log/wyhblog 2>/dev/null || true
-            echo "权限设置为 www-data"
-          elif id nginx &>/dev/null; then
-            sudo chown -R nginx:nginx /var/lib/wyhblog /var/log/wyhblog 2>/dev/null || true
-            echo "权限设置为 nginx"
-          else
-            echo "保持当前用户权限"
-          fi
-          
-          # 配置 systemd 服务
-          if [ -f "deploy/wyhblog.service" ]; then
-            echo "配置 systemd 服务..."
-            sudo cp deploy/wyhblog.service /etc/systemd/system/ 2>/dev/null || true
-            sudo systemctl daemon-reload 2>/dev/null || true
-            
-            # 重启服务
-            if sudo systemctl is-active wyhblog 2>/dev/null; then
-              sudo systemctl restart wyhblog 2>/dev/null || true
-              echo "服务已重启"
-            else
-              sudo systemctl start wyhblog 2>/dev/null || true
-              echo "服务已启动"
-            fi
-            
-            # 检查状态
-            echo "服务状态:"
-            sudo systemctl status wyhblog --no-pager 2>/dev/null || echo "无法获取服务状态"
-          else
-            echo "⚠️ 未找到服务配置文件"
-          fi
-          
-          echo "✅ 部署脚本执行完成"
+          echo "✅ 部署完成"
+          echo "访问: http://wyhblog.xyz"
