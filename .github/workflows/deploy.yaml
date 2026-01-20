@@ -31,7 +31,7 @@ jobs:
         host: ${{ secrets.SERVER_HOST }}
         username: ${{ secrets.SERVER_USER }}
         key: ${{ secrets.SERVER_SSH_KEY }}
-        port: ${{ secrets.SERVER_PORT || 22 }}
+        port: ${{ secrets.SERVER_PORT }}  # 直接使用，如果不存在会报错
         source: "bin/wyhblog,web/dist,deploy/"
         target: "/opt/wyhblog"
         strip_components: 0
@@ -42,7 +42,7 @@ jobs:
         host: ${{ secrets.SERVER_HOST }}
         username: ${{ secrets.SERVER_USER }}
         key: ${{ secrets.SERVER_SSH_KEY }}
-        port: ${{ secrets.SERVER_PORT || 22 }}
+        port: ${{ secrets.SERVER_PORT }}  # 直接使用，如果不存在会报错
         script: |
           cd /opt/wyhblog
           sudo mkdir -p /var/lib/wyhblog /etc/wyhblog
