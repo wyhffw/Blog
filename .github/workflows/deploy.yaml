@@ -1,4 +1,4 @@
-name: Deploy to Server
+name: Deploy to Server - Fixed Version
 
 on:
   push:
@@ -27,151 +27,161 @@ jobs:
         chmod +x bin/wyhblog
         echo "✅ 构建完成"
 
-    # 修复：创建一个单独的文件创建和验证步骤
-    - name: Create and Validate SSH Key File
-      id: setup_ssh
+    # 使用不同方法：在运行时创建密钥文件
+    - name: Prepare SSH for SCP Action
       run: |
-        echo "=== 创建 SSH 密钥文件 ==="
+        echo "=== 为 SCP Action 准备 SSH ==="
         
-        # 设置变量
-        SSH_DIR="/home/runner/.ssh"
-        KEY_PATH="$SSH_DIR/wyhblog_deploy_key"
+        # 创建 .ssh 目录
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
         
-        echo "工作目录: $(pwd)"
-        echo "Home 目录: $HOME"
-        echo "SSH 目录: $SSH_DIR"
-        echo "密钥路径: $KEY_PATH"
+        # 直接写入密钥文件
+        KEY_FILE="/home/runner/.ssh/deploy_key"
+        echo "${{ secrets.SERVER_SSH_KEY }}" > "$KEY_FILE"
         
-        # 确保目录存在
-        mkdir -p "$SSH_DIR"
-        chmod 700 "$SSH_DIR"
-        
-        # 删除可能存在的旧文件
-        rm -f "$KEY_PATH"
-        
-        # 写入私钥
-        echo "正在写入私钥..."
-        echo "${{ secrets.SERVER_SSH_KEY }}" > "$KEY_PATH"
-        
-        # 检查文件
-        echo "=== 检查文件 ==="
-        if [ ! -f "$KEY_PATH" ]; then
-          echo "❌ 错误：文件未创建"
-          echo "当前目录内容:"
-          ls -la
-          echo "$SSH_DIR 目录内容:"
-          ls -la "$SSH_DIR" || echo "目录不存在"
-          exit 1
-        fi
-        
-        echo "✅ 文件创建成功"
-        echo "文件大小: $(wc -c < "$KEY_PATH") 字节"
-        echo "文件权限:"
-        ls -la "$KEY_PATH"
-        
-        # 设置权限
-        chmod 600 "$KEY_PATH"
-        echo "设置权限后: $(stat -c "%a" "$KEY_PATH")"
-        
-        # 验证密钥格式
-        echo "=== 验证密钥格式 ==="
-        if ssh-keygen -l -f "$KEY_PATH" >/dev/null 2>&1; then
-          echo "✅ 密钥格式正确"
-          echo "公钥指纹:"
-          ssh-keygen -l -f "$KEY_PATH"
+        # 验证文件
+        echo "检查密钥文件..."
+        if [ -f "$KEY_FILE" ]; then
+          echo "✅ 密钥文件创建成功: $KEY_FILE"
+          echo "文件大小: $(wc -c < "$KEY_FILE") 字节"
+          
+          # 设置权限
+          chmod 600 "$KEY_FILE"
+          echo "权限设置完成"
+          
+          # 验证密钥
+          echo "验证密钥格式..."
+          if ssh-keygen -l -f "$KEY_FILE" >/dev/null 2>&1; then
+            echo "✅ 密钥格式有效"
+          else
+            echo "❌ 密钥格式无效"
+            ssh-keygen -l -f "$KEY_FILE" 2>&1
+          fi
         else
-          echo "❌ 密钥格式错误"
-          echo "错误信息:"
-          ssh-keygen -l -f "$KEY_PATH" 2>&1
+          echo "❌ 密钥文件创建失败"
           exit 1
         fi
         
-        # 输出文件路径供后续步骤使用
-        echo "KEY_PATH=$KEY_PATH" >> $GITHUB_ENV
-
-    - name: Display Public Key
-      run: |
-        echo "=== 公钥信息 ==="
-        KEY_PATH="${{ env.KEY_PATH }}"
-        
-        echo "公钥内容:"
-        ssh-keygen -y -f "$KEY_PATH" 2>/dev/null
-        
-        echo ""
-        echo "请确保此公钥已在服务器的 ~/.ssh/authorized_keys 中"
-
-    - name: Test SSH Connection with Debug
-      run: |
-        echo "=== 详细 SSH 连接测试 ==="
-        KEY_PATH="${{ env.KEY_PATH }}"
-        
-        echo "密钥文件: $KEY_PATH"
-        echo "文件存在: $(if [ -f "$KEY_PATH" ]; then echo "是"; else echo "否"; fi)"
-        echo "文件权限: $(stat -c "%a" "$KEY_PATH" 2>/dev/null || echo "无法获取")"
-        
-        if [ ! -f "$KEY_PATH" ]; then
-          echo "❌ 错误：密钥文件不存在！"
-          echo "检查 /home/runner/.ssh 目录:"
-          ls -la /home/runner/.ssh/ || echo "目录不存在"
-          exit 1
-        fi
-        
-        # 显示密钥内容（前几行）
-        echo "密钥内容前3行:"
-        head -3 "$KEY_PATH"
-        
-        # 测试连接
-        echo ""
-        echo "正在测试连接到 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}..."
-        
-        # 先添加到 known_hosts
+        # 添加到 known_hosts
         ssh-keyscan -p 22 "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
         
-        # 测试连接（带超时）
-        timeout 10 ssh -v \
-          -o StrictHostKeyChecking=no \
-          -o ConnectTimeout=5 \
-          -i "$KEY_PATH" \
-          -p 22 \
-          "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
-          "echo '✅ 连接成功'; exit 0" && {
-          echo "✅ SSH 连接测试通过"
-        } || {
+        echo "✅ SSH 准备完成"
+
+    - name: Deploy files using direct SCP command
+      run: |
+        echo "=== 使用 SCP 命令直接部署 ==="
+        
+        KEY_FILE="/home/runner/.ssh/deploy_key"
+        SERVER="${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}"
+        
+        echo "服务器: $SERVER"
+        echo "密钥文件: $KEY_FILE"
+        
+        # 测试连接
+        echo "测试 SSH 连接..."
+        ssh -o StrictHostKeyChecking=no \
+            -i "$KEY_FILE" \
+            -p 22 \
+            "$SERVER" \
+            "echo 'SSH 连接测试成功'; exit 0" || {
           echo "❌ SSH 连接失败"
-          echo "可能的原因:"
-          echo "1. 服务器上没有对应的公钥"
-          echo "2. SSH 服务配置问题"
-          echo "3. 防火墙或安全组限制"
+          echo "请确保:"
+          echo "1. 服务器上已添加公钥到 ~/.ssh/authorized_keys"
+          echo "2. SSH 服务正在运行"
+          echo "3. 防火墙允许端口 22"
           exit 1
         }
+        
+        # 创建远程目录
+        echo "创建远程目录..."
+        ssh -o StrictHostKeyChecking=no \
+            -i "$KEY_FILE" \
+            -p 22 \
+            "$SERVER" \
+            "mkdir -p /opt/wyhblog"
+        
+        # 使用 scp 上传文件
+        echo "上传文件..."
+        
+        # 上传 wyhblog 可执行文件
+        scp -o StrictHostKeyChecking=no \
+            -i "$KEY_FILE" \
+            -P 22 \
+            bin/wyhblog \
+            "$SERVER:/opt/wyhblog/"
+        
+        # 上传 web/dist 目录（如果存在）
+        if [ -d "web/dist" ]; then
+          scp -o StrictHostKeyChecking=no \
+              -i "$KEY_FILE" \
+              -P 22 \
+              -r web/dist \
+              "$SERVER:/opt/wyhblog/"
+        fi
+        
+        # 上传 deploy 目录（如果存在）
+        if [ -d "deploy" ]; then
+          scp -o StrictHostKeyChecking=no \
+              -i "$KEY_FILE" \
+              -P 22 \
+              -r deploy \
+              "$SERVER:/opt/wyhblog/"
+        fi
+        
+        echo "✅ 文件上传完成"
 
-    # 如果 SSH 测试成功，继续部署
-    - name: Deploy files to server
-      if: success()
-      uses: appleboy/scp-action@v0.1.7
-      with:
-        host: ${{ secrets.SERVER_HOST }}
-        username: ${{ secrets.SERVER_USER }}
-        key_path: ${{ env.KEY_PATH }}
-        port: 22
-        source: "bin/wyhblog,web/dist,deploy/"
-        target: "/opt/wyhblog"
-        strip_components: 0
-        overwrite: true
-        debug: true
-
-    - name: Execute deployment script
-      if: success()
-      uses: appleboy/ssh-action@v1.0.3
-      with:
-        host: ${{ secrets.SERVER_HOST }}
-        username: ${{ secrets.SERVER_USER }}
-        key_path: ${{ env.KEY_PATH }}
-        port: 22
-        script: |
-          echo "🎉 部署成功！"
-          echo "服务器: $(hostname)"
+    - name: Execute remote deployment script
+      run: |
+        echo "=== 执行远程部署脚本 ==="
+        
+        KEY_FILE="/home/runner/.ssh/deploy_key"
+        SERVER="${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}"
+        
+        # 执行部署脚本
+        ssh -o StrictHostKeyChecking=no \
+            -i "$KEY_FILE" \
+            -p 22 \
+            "$SERVER" << 'EOF'
+          echo "开始远程部署..."
           echo "时间: $(date)"
-          echo ""
-          echo "已部署文件:"
-          ls -la /opt/wyhblog/
+          echo "服务器: $(hostname)"
+          
+          cd /opt/wyhblog || { echo "无法进入 /opt/wyhblog"; exit 1; }
+          
+          echo "当前目录内容:"
+          ls -la
+          
+          # 设置可执行权限
+          if [ -f "wyhblog" ]; then
+            chmod +x wyhblog
+            echo "✅ 设置 wyhblog 可执行权限"
+          fi
+          
+          # 创建系统目录
+          sudo mkdir -p /var/lib/wyhblog /etc/wyhblog /var/log/wyhblog 2>/dev/null || true
+          
+          # 设置目录权限
+          if id www-data &>/dev/null; then
+            sudo chown -R www-data:www-data /var/lib/wyhblog /var/log/wyhblog 2>/dev/null || true
+            echo "使用 www-data 用户"
+          elif id nginx &>/dev/null; then
+            sudo chown -R nginx:nginx /var/lib/wyhblog /var/log/wyhblog 2>/dev/null || true
+            echo "使用 nginx 用户"
+          else
+            echo "使用当前用户"
+          fi
+          
+          # 安装 systemd 服务
+          if [ -f "deploy/wyhblog.service" ]; then
+            echo "安装 systemd 服务..."
+            sudo cp deploy/wyhblog.service /etc/systemd/system/ 2>/dev/null || true
+            sudo systemctl daemon-reload 2>/dev/null || true
+            sudo systemctl restart wyhblog 2>/dev/null || true
+            echo "✅ 服务配置完成"
+          else
+            echo "⚠️ 未找到 deploy/wyhblog.service"
+          fi
+          
+          echo "🎉 部署完成！"
+EOF
