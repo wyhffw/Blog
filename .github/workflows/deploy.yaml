@@ -27,67 +27,132 @@ jobs:
         chmod +x bin/wyhblog
         echo "✅ 构建完成"
 
-    - name: Setup SSH Environment
+    # 修复：创建一个单独的文件创建和验证步骤
+    - name: Create and Validate SSH Key File
+      id: setup_ssh
       run: |
-        echo "=== 设置 SSH 环境 ==="
+        echo "=== 创建 SSH 密钥文件 ==="
         
-        # 创建 SSH 目录和密钥文件
-        mkdir -p ~/.ssh
-        chmod 700 ~/.ssh
+        # 设置变量
+        SSH_DIR="/home/runner/.ssh"
+        KEY_PATH="$SSH_DIR/wyhblog_deploy_key"
         
-        # 使用完整的绝对路径
-        KEY_PATH="/home/runner/.ssh/wyhblog_deploy_key"
+        echo "工作目录: $(pwd)"
+        echo "Home 目录: $HOME"
+        echo "SSH 目录: $SSH_DIR"
+        echo "密钥路径: $KEY_PATH"
+        
+        # 确保目录存在
+        mkdir -p "$SSH_DIR"
+        chmod 700 "$SSH_DIR"
+        
+        # 删除可能存在的旧文件
+        rm -f "$KEY_PATH"
+        
+        # 写入私钥
+        echo "正在写入私钥..."
         echo "${{ secrets.SERVER_SSH_KEY }}" > "$KEY_PATH"
-        chmod 600 "$KEY_PATH"
         
-        # 验证密钥
-        echo "✅ 密钥文件创建成功"
-        echo "文件路径: $KEY_PATH"
-        echo "文件信息:"
+        # 检查文件
+        echo "=== 检查文件 ==="
+        if [ ! -f "$KEY_PATH" ]; then
+          echo "❌ 错误：文件未创建"
+          echo "当前目录内容:"
+          ls -la
+          echo "$SSH_DIR 目录内容:"
+          ls -la "$SSH_DIR" || echo "目录不存在"
+          exit 1
+        fi
+        
+        echo "✅ 文件创建成功"
+        echo "文件大小: $(wc -c < "$KEY_PATH") 字节"
+        echo "文件权限:"
         ls -la "$KEY_PATH"
-        echo ""
-        echo "密钥指纹:"
-        ssh-keygen -l -f "$KEY_PATH"
+        
+        # 设置权限
+        chmod 600 "$KEY_PATH"
+        echo "设置权限后: $(stat -c "%a" "$KEY_PATH")"
+        
+        # 验证密钥格式
+        echo "=== 验证密钥格式 ==="
+        if ssh-keygen -l -f "$KEY_PATH" >/dev/null 2>&1; then
+          echo "✅ 密钥格式正确"
+          echo "公钥指纹:"
+          ssh-keygen -l -f "$KEY_PATH"
+        else
+          echo "❌ 密钥格式错误"
+          echo "错误信息:"
+          ssh-keygen -l -f "$KEY_PATH" 2>&1
+          exit 1
+        fi
+        
+        # 输出文件路径供后续步骤使用
+        echo "KEY_PATH=$KEY_PATH" >> $GITHUB_ENV
 
-    - name: Display Public Key for Server
+    - name: Display Public Key
       run: |
         echo "=== 公钥信息 ==="
-        KEY_PATH="/home/runner/.ssh/wyhblog_deploy_key"
+        KEY_PATH="${{ env.KEY_PATH }}"
         
-        echo "公钥内容（已添加到服务器）:"
+        echo "公钥内容:"
         ssh-keygen -y -f "$KEY_PATH" 2>/dev/null
         
         echo ""
-        echo "公钥指纹:"
-        ssh-keygen -l -f "$KEY_PATH"
+        echo "请确保此公钥已在服务器的 ~/.ssh/authorized_keys 中"
 
-    - name: Test SSH Connection
+    - name: Test SSH Connection with Debug
       run: |
-        echo "=== 测试 SSH 连接 ==="
-        KEY_PATH="/home/runner/.ssh/wyhblog_deploy_key"
+        echo "=== 详细 SSH 连接测试 ==="
+        KEY_PATH="${{ env.KEY_PATH }}"
         
-        # 添加到 known_hosts
-        ssh-keyscan -p 22 "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+        echo "密钥文件: $KEY_PATH"
+        echo "文件存在: $(if [ -f "$KEY_PATH" ]; then echo "是"; else echo "否"; fi)"
+        echo "文件权限: $(stat -c "%a" "$KEY_PATH" 2>/dev/null || echo "无法获取")"
+        
+        if [ ! -f "$KEY_PATH" ]; then
+          echo "❌ 错误：密钥文件不存在！"
+          echo "检查 /home/runner/.ssh 目录:"
+          ls -la /home/runner/.ssh/ || echo "目录不存在"
+          exit 1
+        fi
+        
+        # 显示密钥内容（前几行）
+        echo "密钥内容前3行:"
+        head -3 "$KEY_PATH"
         
         # 测试连接
-        echo "测试连接到服务器..."
-        ssh -o StrictHostKeyChecking=no \
-            -o ConnectTimeout=10 \
-            -i "$KEY_PATH" \
-            -p 22 \
-            "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
-            "echo '✅ SSH 连接成功'; hostname" || {
+        echo ""
+        echo "正在测试连接到 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}..."
+        
+        # 先添加到 known_hosts
+        ssh-keyscan -p 22 "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+        
+        # 测试连接（带超时）
+        timeout 10 ssh -v \
+          -o StrictHostKeyChecking=no \
+          -o ConnectTimeout=5 \
+          -i "$KEY_PATH" \
+          -p 22 \
+          "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
+          "echo '✅ 连接成功'; exit 0" && {
+          echo "✅ SSH 连接测试通过"
+        } || {
           echo "❌ SSH 连接失败"
-          echo "请确保服务器上的 authorized_keys 包含正确的公钥"
+          echo "可能的原因:"
+          echo "1. 服务器上没有对应的公钥"
+          echo "2. SSH 服务配置问题"
+          echo "3. 防火墙或安全组限制"
           exit 1
         }
 
+    # 如果 SSH 测试成功，继续部署
     - name: Deploy files to server
+      if: success()
       uses: appleboy/scp-action@v0.1.7
       with:
         host: ${{ secrets.SERVER_HOST }}
         username: ${{ secrets.SERVER_USER }}
-        key_path: /home/runner/.ssh/wyhblog_deploy_key  # 使用绝对路径
+        key_path: ${{ env.KEY_PATH }}
         port: 22
         source: "bin/wyhblog,web/dist,deploy/"
         target: "/opt/wyhblog"
@@ -96,22 +161,17 @@ jobs:
         debug: true
 
     - name: Execute deployment script
+      if: success()
       uses: appleboy/ssh-action@v1.0.3
       with:
         host: ${{ secrets.SERVER_HOST }}
         username: ${{ secrets.SERVER_USER }}
-        key_path: /home/runner/.ssh/wyhblog_deploy_key  # 使用绝对路径
+        key_path: ${{ env.KEY_PATH }}
         port: 22
         script: |
-          echo "✅ 部署成功！"
+          echo "🎉 部署成功！"
           echo "服务器: $(hostname)"
           echo "时间: $(date)"
           echo ""
-          echo "部署的文件:"
+          echo "已部署文件:"
           ls -la /opt/wyhblog/
-          echo ""
-          echo "检查 wyhblog 可执行文件:"
-          if [ -f "/opt/wyhblog/wyhblog" ]; then
-            chmod +x /opt/wyhblog/wyhblog
-            echo "文件权限: $(ls -la /opt/wyhblog/wyhblog)"
-          fi
