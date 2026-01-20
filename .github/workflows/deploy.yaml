@@ -30,16 +30,17 @@ jobs:
         chmod +x bin/wyhblog
         echo "构建完成"
 
-    # 4. 上传文件到服务器
-    - name: Upload to server
+    # 4. 上传整个项目到服务器
+    - name: Upload entire project
       uses: appleboy/scp-action@v0.1.7
       with:
         host: ${{ secrets.SERVER_HOST }}
         username: ${{ secrets.SERVER_USER }}
         key: ${{ secrets.SERVER_SSH_KEY }}
         port: 22
-        source: "bin/wyhblog"
-        target: "/opt/wyhblog/bin/"
+        source: "."
+        target: "/opt/wyhblog"
+        strip_components: 0
         overwrite: true
 
     # 5. 在服务器上运行
@@ -51,10 +52,22 @@ jobs:
         key: ${{ secrets.SERVER_SSH_KEY }}
         port: 22
         script: |
-          cd /opt/wyhblog/bin
+          cd /opt/wyhblog
+          echo "服务器上的文件:"
+          ls -la
+          echo ""
+          echo "检查重要文件:"
+          [ -f "go.mod" ] && echo "✅ go.mod 存在" || echo "❌ go.mod 不存在"
+          [ -f "go.sum" ] && echo "✅ go.sum 存在" || echo "❌ go.sum 不存在"
+          [ -d "web" ] && echo "✅ web 目录存在" || echo "❌ web 目录不存在"
+          [ -d "deploy" ] && echo "✅ deploy 目录存在" || echo "❌ deploy 目录不存在"
+          
+          # 运行应用
+          cd bin
           chmod +x wyhblog
-          # 停止旧的
           pkill wyhblog 2>/dev/null || true
-          # 启动新的
-          nohup ./wyhblog > app.log 2>&1 &
-          echo "应用已启动"
+          nohup ./wyhblog > ../app.log 2>&1 &
+          sleep 2
+          
+          echo "应用日志:"
+          tail -5 ../app.log
