@@ -7,13 +7,15 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
     
     steps:
-    # 1. 检出代码
+    # 1. 检出代码（必须第一步）
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 获取所有文件
 
     # 2. 设置 Go 环境
     - name: Set up Go
@@ -24,33 +26,83 @@ jobs:
     # 3. 构建应用
     - name: Build application
       run: |
+        echo "开始构建 Go 应用..."
+        echo "当前目录: $(pwd)"
+        echo "目录内容:"
+        ls -la
+        
+        # 创建 bin 目录
         mkdir -p bin
-        go build -o bin/wyhblog ./cmd/server
+        
+        # 尝试不同的构建方式
+        if [ -d "cmd/server" ]; then
+          echo "构建 cmd/server..."
+          go build -o bin/wyhblog ./cmd/server
+        elif [ -f "main.go" ]; then
+          echo "构建 main.go..."
+          go build -o bin/wyhblog .
+        else
+          # 查找 main.go
+          MAIN_FILE=$(find . -name "main.go" -type f | head -1)
+          if [ ! -z "$MAIN_FILE" ]; then
+            echo "找到 main.go: $MAIN_FILE"
+            go build -o bin/wyhblog "$MAIN_FILE"
+          else
+            echo "❌ 未找到入口文件"
+            exit 1
+          fi
+        fi
+        
         chmod +x bin/wyhblog
-        echo "✅ 构建完成"
+        echo "✅ 构建完成: $(du -h bin/wyhblog | cut -f1)"
 
-    # 4. 使用 rsync 部署文件 ⬅️ 这是你要添加的步骤
-    - name: Deploy files with rsync
-      uses: burnett01/rsync-deployments@7.0.1
+    # 4. 调试：列出要部署的文件
+    - name: List files to deploy
+      run: |
+        echo "=== 要部署的文件 ==="
+        echo ""
+        echo "1. 检查文件是否存在:"
+        [ -f "go.mod" ] && echo "✅ go.mod" || echo "❌ go.mod (缺失)"
+        [ -f "go.sum" ] && echo "✅ go.sum" || echo "❌ go.sum (缺失)"
+        [ -d "web/" ] && echo "✅ web/ 目录" || echo "❌ web/ (缺失)"
+        [ -d "deploy/" ] && echo "✅ deploy/ 目录" || echo "❌ deploy/ (缺失)"
+        [ -f "bin/wyhblog" ] && echo "✅ bin/wyhblog" || echo "❌ bin/wyhblog (缺失)"
+        
+        echo ""
+        echo "2. 目录结构:"
+        ls -la
+        
+        echo ""
+        echo "3. 具体文件:"
+        find . -type f -name "*.go" -o -name "go.*" -o -name "*.yaml" -o -name "*.yml" -o -name "*.json" | head -20
+
+    # 5. 使用 scp-action 部署（最可靠）
+    - name: Deploy to server using SCP
+      uses: appleboy/scp-action@v0.1.7
       with:
-        switches: -avz --delete
-        path: |
-          bin/
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USER }}
+        key: ${{ secrets.SERVER_SSH_KEY }}
+        port: 22
+        source: |
+          bin/wyhblog
           web/
           deploy/
           go.mod
           go.sum
-          .env.example
-          config.yaml
-          docker-compose.yml
-          README.md
-        remote_path: /opt/wyhblog/
-        remote_host: ${{ secrets.SERVER_HOST }}
-        remote_user: ${{ secrets.SERVER_USER }}
-        remote_key: ${{ secrets.SERVER_SSH_KEY }}
+          *.yaml
+          *.yml
+          *.json
+          .env*
+          README*
+          Dockerfile*
+        target: "/opt/wyhblog"
+        strip_components: 0
+        overwrite: true
+        debug: true
 
-    # 5. 在服务器上执行部署脚本
-    - name: Execute deployment script
+    # 6. 在服务器上安装 Go 并重新编译（解决 GLIBC 问题）
+    - name: Install Go and compile on server
       uses: appleboy/ssh-action@v1.0.3
       with:
         host: ${{ secrets.SERVER_HOST }}
@@ -58,14 +110,121 @@ jobs:
         key: ${{ secrets.SERVER_SSH_KEY }}
         port: 22
         script: |
-          echo "开始部署..."
+          echo "=== 在服务器上编译应用 ==="
+          
+          # 进入目录
+          cd /opt/wyhblog
+          echo "当前目录: $(pwd)"
+          echo "文件列表:"
+          ls -la
+          
+          # 安装 Go（如果未安装）
+          if ! command -v go &> /dev/null; then
+            echo "安装 Go..."
+            cd /tmp
+            wget -q https://go.dev/dl/go1.22.0.linux-amd64.tar.gz
+            sudo tar -C /usr/local -xzf go1.22.0.linux-amd64.tar.gz
+            echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+            export PATH=$PATH:/usr/local/go/bin
+          fi
+          
+          echo "Go 版本: $(go version)"
+          
+          # 重新编译应用
+          echo "重新编译应用..."
+          if [ -f "go.mod" ]; then
+            go mod download
+          fi
+          
+          # 编译
+          if [ -d "cmd/server" ]; then
+            go build -o bin/wyhblog_centos ./cmd/server
+          else
+            go build -o bin/wyhblog_centos .
+          fi
+          
+          # 替换旧文件
+          if [ -f "bin/wyhblog_centos" ]; then
+            mv -f bin/wyhblog_centos bin/wyhblog
+            chmod +x bin/wyhblog
+            echo "✅ 重新编译成功"
+            file bin/wyhblog
+          else
+            echo "❌ 编译失败"
+            exit 1
+          fi
+
+    # 7. 配置和启动服务
+    - name: Configure and start service
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USER }}
+        key: ${{ secrets.SERVER_SSH_KEY }}
+        port: 22
+        script: |
+          echo "=== 配置服务器 ==="
+          
+          # 进入目录
           cd /opt/wyhblog
           
           # 确保可执行权限
-          chmod +x bin/wyhblog 2>/dev/null || true
+          chmod +x bin/wyhblog
           
-          # 重启服务
-          sudo systemctl restart wyhblog 2>/dev/null || echo "服务重启失败，可能是首次部署"
+          # 停止旧进程
+          pkill -9 wyhblog 2>/dev/null || true
           
-          echo "✅ 部署完成"
+          # 启动应用
+          echo "启动应用..."
+          nohup ./bin/wyhblog > /tmp/wyhblog.log 2>&1 &
+          sleep 3
+          
+          # 检查是否运行
+          if netstat -tln | grep :8080 > /dev/null; then
+            echo "✅ 应用已启动，监听 8080 端口"
+          else
+            echo "❌ 应用启动失败，查看日志:"
+            tail -20 /tmp/wyhblog.log
+            exit 1
+          fi
+          
+          # 配置 Nginx
+          echo "配置 Nginx..."
+          if ! command -v nginx &> /dev/null; then
+            sudo yum install epel-release nginx -y
+          fi
+          
+          sudo tee /etc/nginx/conf.d/wyhblog.conf << 'EOF'
+server {
+    listen 80;
+    server_name wyhblog.xyz www.wyhblog.xyz;
+    
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+EOF
+          
+          sudo systemctl restart nginx
+          sudo systemctl enable nginx
+          
+          # 最终测试
+          echo "测试访问..."
+          curl -s -o /dev/null -w "本地应用: %{http_code}\n" http://localhost:8080
+          curl -s -o /dev/null -w "Nginx代理: %{http_code}\n" http://localhost
+          
+          echo ""
+          echo "🎉 部署完成!"
           echo "访问: http://wyhblog.xyz"
+
+    # 8. 验证部署（可选）
+    - name: Verify deployment
+      run: |
+        echo "部署验证:"
+        echo "1. 检查构建产物:"
+        ls -la bin/wyhblog 2>/dev/null || echo "构建失败"
+        echo ""
+        echo "2. 工作流执行完成"
+        echo "请访问 http://wyhblog.xyz 检查网站"
