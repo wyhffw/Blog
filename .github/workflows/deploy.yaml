@@ -16,19 +16,27 @@ jobs:
       with:
         go-version: '1.22'
 
-    # 3. 构建应用
+    # 3. 构建应用（使用静态编译）
     - name: Build
       run: |
         mkdir -p bin
-        # 查找并编译 main.go
-        MAIN_FILE=$(find . -name "main.go" -type f | head -1)
-        if [ -n "$MAIN_FILE" ]; then
-          go build -o bin/wyhblog "$MAIN_FILE"
-        else
-          go build -o bin/wyhblog .
-        fi
+        echo "设置 Go 代理..."
+        go env -w GOPROXY=https://goproxy.cn,direct
+        
+        echo "下载依赖..."
+        go mod download
+        
+        echo "静态编译应用..."
+        # 静态编译，避免 GLIBC 问题
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+          -ldflags="-s -w" \
+          -o bin/wyhblog ./cmd/server
+        
         chmod +x bin/wyhblog
-        echo "构建完成"
+        echo "✅ 构建完成"
+        echo "文件信息:"
+        file bin/wyhblog
+        echo "大小: $(du -h bin/wyhblog | cut -f1)"
 
     # 4. 上传整个项目到服务器
     - name: Upload entire project
@@ -43,7 +51,7 @@ jobs:
         strip_components: 0
         overwrite: true
 
-    # 5. 在服务器上运行
+    # 5. 在服务器上运行（跳过 Go 编译，直接运行）
     - name: Run on server
       uses: appleboy/ssh-action@v1.0.3
       with:
@@ -52,22 +60,61 @@ jobs:
         key: ${{ secrets.SERVER_SSH_KEY }}
         port: 22
         script: |
+          echo "=== 服务器部署 ==="
           cd /opt/wyhblog
-          echo "服务器上的文件:"
+          
+          echo "1. 检查文件:"
           ls -la
           echo ""
-          echo "检查重要文件:"
+          echo "重要文件检查:"
           [ -f "go.mod" ] && echo "✅ go.mod 存在" || echo "❌ go.mod 不存在"
           [ -f "go.sum" ] && echo "✅ go.sum 存在" || echo "❌ go.sum 不存在"
           [ -d "web" ] && echo "✅ web 目录存在" || echo "❌ web 目录不存在"
           [ -d "deploy" ] && echo "✅ deploy 目录存在" || echo "❌ deploy 目录不存在"
+          [ -f "bin/wyhblog" ] && echo "✅ bin/wyhblog 存在" || echo "❌ bin/wyhblog 不存在"
           
-          # 运行应用
+          echo ""
+          echo "2. 启动应用..."
           cd bin
           chmod +x wyhblog
-          pkill wyhblog 2>/dev/null || true
-          nohup ./wyhblog > ../app.log 2>&1 &
-          sleep 2
           
-          echo "应用日志:"
-          tail -5 ../app.log
+          # 停止旧进程
+          pkill wyhblog 2>/dev/null || true
+          sleep 1
+          
+          # 启动新进程
+          nohup ./wyhblog > ../app.log 2>&1 &
+          APP_PID=$!
+          sleep 3
+          
+          echo ""
+          echo "3. 检查状态:"
+          # 检查进程
+          if ps -p $APP_PID > /dev/null; then
+            echo "✅ 应用进程运行中 (PID: $APP_PID)"
+          else
+            echo "❌ 应用进程已退出"
+            echo "查看日志:"
+            tail -20 ../app.log
+            exit 1
+          fi
+          
+          # 检查端口
+          if netstat -tln 2>/dev/null | grep :8080 > /dev/null; then
+            echo "✅ 应用监听 8080 端口"
+          else
+            echo "❌ 应用未监听端口"
+            echo "查看日志:"
+            tail -20 ../app.log
+          fi
+          
+          # 测试访问
+          echo ""
+          echo "4. 测试访问:"
+          curl -s -o /dev/null -w "HTTP状态码: %{http_code}\n" --connect-timeout 5 http://localhost:8080 || echo "访问失败"
+          
+          echo ""
+          echo "🎉 部署完成!"
+          echo "访问地址:"
+          echo "1. 直接访问应用: http://39.99.34.36:8080"
+          echo "2. 域名访问: http://wyhblog.xyz (需要配置 Nginx)"
