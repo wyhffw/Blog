@@ -1,55 +1,33 @@
-name: Deploy wyhblog to Server
+name: Deploy wyhblog
 on:
   push:
     branches: [main]
-    paths:
-      - '**'
-      - '!.github/**'  # 避免部署文件自身触发循环
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     
     steps:
-      # 1. 检出代码
-      - name: Checkout repository
+      # 1. 拉取代码
+      - name: Checkout code
         uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
 
-      # 2. 设置Go环境
+      # 2. 设置Go
       - name: Setup Go
         uses: actions/setup-go@v4
         with:
-          go-version: '1.20'
-          cache: true
-          cache-dependency-path: go.sum
+          go-version: '1.21'
 
-      # 3. 编译Go程序
-      - name: Build Go binary
+      # 3. 编译程序
+      - name: Build
         run: |
-          echo "Building wyhblog binary..."
-          # 确保编译参数匹配你的项目结构
-          go build -o bin/wyhblog ./cmd/wyhblog   # 或 ./main.go
-          ls -lh bin/
-          # 为二进制文件添加执行权限
-          chmod +x bin/wyhblog
+          # 如果你的主文件在根目录叫 main.go
+          go build -o wyhblog main.go
+          # 或：go build -o wyhblog .
+          chmod +x wyhblog
 
-      # 4. 同步文件到服务器
-      - name: Sync files to server
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: 22
-          source: "bin/wyhblog,config/,templates/,static/"
-          target: "/opt/wyhblog/"
-          strip_components: 0
-          overwrite: true
-
-      # 5. 部署到服务器（关键步骤）
-      - name: Deploy on server
+      # 4. 上传到服务器并重启
+      - name: Deploy
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -57,80 +35,26 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: 22
           script: |
-            echo "=== 开始部署 wyhblog ==="
-            DEPLOY_DIR="/opt/wyhblog"
-            BINARY_PATH="$DEPLOY_DIR/bin/wyhblog"
+            # 进入目录
+            cd /opt/wyhblog
             
-            # 1. 确保目录存在
-            mkdir -p $DEPLOY_DIR/{bin,logs,data}
+            # 停止旧程序
+            pkill -f wyhblog || true
+            sleep 2
             
-            # 2. 备份当前版本（可选）
-            if [ -f "$BINARY_PATH" ]; then
-              TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-              cp "$BINARY_PATH" "$BINARY_PATH.backup-$TIMESTAMP"
-              echo "已备份旧版本"
-            fi
+            # 上传新程序（用scp上传）
+            echo "上传文件中..."
             
-            # 3. 停止现有进程（改进版）
-            echo "停止现有服务..."
-            # 使用systemd管理（推荐）
-            if systemctl is-active --quiet wyhblog.service 2>/dev/null; then
-              sudo systemctl stop wyhblog.service
-              echo "通过systemd停止服务"
+            # 启动新程序
+            nohup ./wyhblog > logs/wyhblog.log 2>&1 &
+            
+            # 检查是否运行
+            sleep 3
+            if pgrep -f wyhblog >/dev/null; then
+              echo "✅ 部署成功！"
+              echo "进程ID: $(pgrep -f wyhblog)"
             else
-              # 备用：查找并终止进程
-              PIDS=$(pgrep -f "wyhblog" || true)
-              if [ ! -z "$PIDS" ]; then
-                echo "找到进程: $PIDS，正在停止..."
-                kill $PIDS 2>/dev/null || true
-                sleep 3
-                # 强制终止仍在运行的进程
-                PIDS_REMAIN=$(pgrep -f "wyhblog" || true)
-                if [ ! -z "$PIDS_REMAIN" ]; then
-                  kill -9 $PIDS_REMAIN 2>/dev/null || true
-                  echo "强制终止进程"
-                fi
-              fi
-            fi
-            
-            # 4. 确保二进制文件可执行
-            chmod +x "$BINARY_PATH"
-            
-            # 5. 启动服务
-            echo "启动新版本..."
-            # 方式A：直接后台运行
-            cd $DEPLOY_DIR
-            nohup $BINARY_PATH > $DEPLOY_DIR/logs/wyhblog.log 2>&1 &
-            
-            # 方式B：或使用systemd（如果已配置）
-            # sudo systemctl start wyhblog.service
-            
-            # 6. 验证部署
-            sleep 5  # 等待应用启动
-            
-            # 检查进程
-            if pgrep -f "wyhblog" >/dev/null; then
-              echo "✓ wyhblog 进程运行正常"
-              # 检查端口监听（假设使用8080端口）
-              if ss -tlnp | grep -q ":8080"; then
-                echo "✓ 端口 8080 监听正常"
-              else
-                echo "⚠ 警告：端口 8080 未监听"
-              fi
-            else
-              echo "✗ 错误：wyhblog 进程未启动"
-              echo "=== 最后50行日志 ==="
-              tail -50 $DEPLOY_DIR/logs/wyhblog.log || true
+              echo "❌ 启动失败"
+              tail -20 logs/wyhblog.log
               exit 1
             fi
-            
-            echo "=== 部署完成 ==="
-
-      # 6. 健康检查（可选）
-      - name: Health check
-        run: |
-          echo "等待服务启动..."
-          sleep 10
-          # 测试服务是否响应
-          curl -f http://${{ secrets.SERVER_HOST }}:8080/health || \
-          curl -f http://${{ secrets.SERVER_HOST }}:8080/ || true
