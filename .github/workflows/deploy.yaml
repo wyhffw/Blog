@@ -37,7 +37,25 @@ jobs:
         echo "文件信息:"
         file bin/wyhblog
         echo "大小: $(du -h bin/wyhblog | cut -f1)"
-
+    
+    - name: Stop wyhblog on server
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USER }}
+        key: ${{ secrets.SERVER_SSH_KEY }}
+        port: 22
+        script: |
+          echo "Stopping existing wyhblog (if any)..."
+          # 先尝试优雅停止，再强制
+          pkill -f 'bin/wyhblog' || pkill wyhblog || true
+          sleep 2
+          if pgrep -f 'bin/wyhblog' >/dev/null; then
+            echo "Process still alive, force killing..."
+            pgrep -f 'bin/wyhblog' | xargs -r kill -9 || true
+          fi
+          echo "Stopped."
+          
     # 4. 上传整个项目到服务器
     - name: Upload entire project
       uses: appleboy/scp-action@v0.1.7
