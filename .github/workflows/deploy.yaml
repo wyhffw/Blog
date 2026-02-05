@@ -12,23 +12,48 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # 2. 设置Go环境
+      # 2. 设置Go
       - name: Setup Go
         uses: actions/setup-go@v4
         with:
           go-version: '1.21'
 
-      # 3. 编译程序（关键：指定cmd/server目录）
+      # 3. 编译
       - name: Build binary
         run: |
+          echo "编译目录: $(pwd)"
           cd cmd/server
           go build -o ../../wyhblog .
-          cd ../..
-          chmod +x wyhblog
-          ls -lh wyhblog
+          ls -lh ../../wyhblog
 
-      # 4. 部署到服务器
-      - name: Deploy to server
+      # 4. 测试SSH连接（新增诊断步骤）
+      - name: Test SSH connection
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: 22
+          script: |
+            echo "✅ SSH连接成功"
+            echo "服务器时间: $(date)"
+            echo "当前目录: $(pwd)"
+            echo "磁盘空间:"
+            df -h
+
+      # 5. 上传文件（单独步骤）
+      - name: Upload binary
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          source: "wyhblog"
+          target: "/tmp/"
+          overwrite: true
+
+      # 6. 部署运行（简化版）
+      - name: Run on server
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -37,41 +62,32 @@ jobs:
           script: |
             echo "=== 开始部署 ==="
             
-            # 工作目录
-            WORK_DIR="/opt/wyhblog"
+            # 1. 创建目录
+            DEPLOY_DIR="/opt/wyhblog"
+            mkdir -p $DEPLOY_DIR/logs
             
-            # 1. 创建目录（如果不存在）
-            mkdir -p $WORK_DIR/logs
-            
-            # 2. 停止正在运行的程序
+            # 2. 停止旧进程
             echo "停止旧进程..."
-            pkill -f wyhblog || true
+            pkill -f wyhblog || echo "没有正在运行的进程"
             sleep 2
             
-            # 3. 上传新程序
-            echo "上传文件..."
-            # 这里使用scp-action会自动上传，我们只需接收
+            # 3. 移动并设置权限
+            echo "安装新版本..."
+            mv /tmp/wyhblog $DEPLOY_DIR/
+            chmod +x $DEPLOY_DIR/wyhblog
             
-            # 4. 移动到正确位置并启动
-            cd $WORK_DIR
-            mv /tmp/wyhblog ./wyhblog 2>/dev/null || true
-            chmod +x wyhblog
-            
-            # 5. 启动程序（后台运行）
+            # 4. 启动
             echo "启动程序..."
+            cd $DEPLOY_DIR
             nohup ./wyhblog > logs/wyhblog.log 2>&1 &
             
-            # 6. 检查是否启动成功
+            # 5. 验证
             sleep 3
             if pgrep -f wyhblog >/dev/null; then
-              PID=$(pgrep -f wyhblog)
-              echo "✅ 部署成功！"
-              echo "进程ID: $PID"
-              echo "日志文件: $WORK_DIR/logs/wyhblog.log"
+              echo "✅ 启动成功！PID: $(pgrep -f wyhblog)"
+              echo "查看日志: tail -f $DEPLOY_DIR/logs/wyhblog.log"
             else
               echo "❌ 启动失败，查看日志："
               tail -20 logs/wyhblog.log
               exit 1
             fi
-            
-            echo "=== 部署完成 ==="
