@@ -12,49 +12,66 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # 2. 设置Go
+      # 2. 设置Go环境
       - name: Setup Go
         uses: actions/setup-go@v4
         with:
           go-version: '1.21'
 
-      # 3. 编译程序
-      - name: Build
+      # 3. 编译程序（关键：指定cmd/server目录）
+      - name: Build binary
         run: |
-          # 如果你的主文件在根目录叫 main.go
-          go build -o wyhblog main.go
-          # 或：go build -o wyhblog .
+          cd cmd/server
+          go build -o ../../wyhblog .
+          cd ../..
           chmod +x wyhblog
+          ls -lh wyhblog
 
-      # 4. 上传到服务器并重启
-      - name: Deploy
+      # 4. 部署到服务器
+      - name: Deploy to server
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          port: 22
           script: |
-            # 进入目录
-            cd /opt/wyhblog
+            echo "=== 开始部署 ==="
             
-            # 停止旧程序
+            # 工作目录
+            WORK_DIR="/opt/wyhblog"
+            
+            # 1. 创建目录（如果不存在）
+            mkdir -p $WORK_DIR/logs
+            
+            # 2. 停止正在运行的程序
+            echo "停止旧进程..."
             pkill -f wyhblog || true
             sleep 2
             
-            # 上传新程序（用scp上传）
-            echo "上传文件中..."
+            # 3. 上传新程序
+            echo "上传文件..."
+            # 这里使用scp-action会自动上传，我们只需接收
             
-            # 启动新程序
+            # 4. 移动到正确位置并启动
+            cd $WORK_DIR
+            mv /tmp/wyhblog ./wyhblog 2>/dev/null || true
+            chmod +x wyhblog
+            
+            # 5. 启动程序（后台运行）
+            echo "启动程序..."
             nohup ./wyhblog > logs/wyhblog.log 2>&1 &
             
-            # 检查是否运行
+            # 6. 检查是否启动成功
             sleep 3
             if pgrep -f wyhblog >/dev/null; then
+              PID=$(pgrep -f wyhblog)
               echo "✅ 部署成功！"
-              echo "进程ID: $(pgrep -f wyhblog)"
+              echo "进程ID: $PID"
+              echo "日志文件: $WORK_DIR/logs/wyhblog.log"
             else
-              echo "❌ 启动失败"
+              echo "❌ 启动失败，查看日志："
               tail -20 logs/wyhblog.log
               exit 1
             fi
+            
+            echo "=== 部署完成 ==="
