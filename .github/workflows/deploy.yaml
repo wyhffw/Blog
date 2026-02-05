@@ -1,121 +1,136 @@
-name: Simple Deploy
-on: [push, workflow_dispatch]
+name: Deploy wyhblog to Server
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**'
+      - '!.github/**'  # 避免部署文件自身触发循环
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     
     steps:
-    # 1. 拉取代码
-    - name: Checkout code
-      uses: actions/checkout@v4
+      # 1. 检出代码
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
 
-    # 2. 安装 Go
-    - name: Setup Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.22'
+      # 2. 设置Go环境
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.20'
+          cache: true
+          cache-dependency-path: go.sum
 
-    # 3. 构建应用（使用静态编译）
-    - name: Build
-      run: |
-        mkdir -p bin
-        echo "设置 Go 代理..."
-        go env -w GOPROXY=https://goproxy.cn,direct
-        
-        echo "下载依赖..."
-        go mod download
-        
-        echo "静态编译应用..."
-        # 静态编译，避免 GLIBC 问题
-        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-          -ldflags="-s -w" \
-          -o bin/wyhblog ./cmd/server
-        
-        chmod +x bin/wyhblog
-        echo "✅ 构建完成"
-        echo "文件信息:"
-        file bin/wyhblog
-        echo "大小: $(du -h bin/wyhblog | cut -f1)"
-    
-          
-    # 4. 上传整个项目到服务器
-    - name: Upload entire project
-      uses: appleboy/scp-action@v0.1.7
-      with:
-        host: ${{ secrets.SERVER_HOST }}
-        username: ${{ secrets.SERVER_USER }}
-        key: ${{ secrets.SERVER_SSH_KEY }}
-        port: 22
-        source: "."
-        target: "/opt/wyhblog"
-        strip_components: 0
-        overwrite: true
+      # 3. 编译Go程序
+      - name: Build Go binary
+        run: |
+          echo "Building wyhblog binary..."
+          # 确保编译参数匹配你的项目结构
+          go build -o bin/wyhblog ./cmd/wyhblog   # 或 ./main.go
+          ls -lh bin/
+          # 为二进制文件添加执行权限
+          chmod +x bin/wyhblog
 
-    # 5. 在服务器上运行（跳过 Go 编译，直接运行）
-    - name: Run on server
-      uses: appleboy/ssh-action@v1.0.3
-      with:
-        host: ${{ secrets.SERVER_HOST }}
-        username: ${{ secrets.SERVER_USER }}
-        key: ${{ secrets.SERVER_SSH_KEY }}
-        port: 22
-        script: |
-          echo "=== 服务器部署 ==="
-          cd /opt/wyhblog
-          
-          echo "1. 检查文件:"
-          ls -la
-          echo ""
-          echo "重要文件检查:"
-          [ -f "go.mod" ] && echo "✅ go.mod 存在" || echo "❌ go.mod 不存在"
-          [ -f "go.sum" ] && echo "✅ go.sum 存在" || echo "❌ go.sum 不存在"
-          [ -d "web" ] && echo "✅ web 目录存在" || echo "❌ web 目录不存在"
-          [ -d "deploy" ] && echo "✅ deploy 目录存在" || echo "❌ deploy 目录不存在"
-          [ -f "bin/wyhblog" ] && echo "✅ bin/wyhblog 存在" || echo "❌ bin/wyhblog 不存在"
-          
-          echo ""
-          echo "2. 启动应用..."
-          cd bin
-          chmod +x wyhblog
-          
-          # 停止旧进程
-          pkill wyhblog 2>/dev/null || true
-          sleep 1
-          
-          # 启动新进程
-          nohup ./wyhblog > ../app.log 2>&1 &
-          APP_PID=$!
-          sleep 3
-          
-          echo ""
-          echo "3. 检查状态:"
-          # 检查进程
-          if ps -p $APP_PID > /dev/null; then
-            echo "✅ 应用进程运行中 (PID: $APP_PID)"
-          else
-            echo "❌ 应用进程已退出"
-            echo "查看日志:"
-            tail -20 ../app.log
-            exit 1
-          fi
-          
-          # 检查端口
-          if netstat -tln 2>/dev/null | grep :8080 > /dev/null; then
-            echo "✅ 应用监听 8080 端口"
-          else
-            echo "❌ 应用未监听端口"
-            echo "查看日志:"
-            tail -20 ../app.log
-          fi
-          
-          # 测试访问
-          echo ""
-          echo "4. 测试访问:"
-          curl -s -o /dev/null -w "HTTP状态码: %{http_code}\n" --connect-timeout 5 http://localhost:8080 || echo "访问失败"
-          
-          echo ""
-          echo "🎉 部署完成!"
-          echo "访问地址:"
-          echo "1. 直接访问应用: http://39.99.34.36:8080"
-          echo "2. 域名访问: http://wyhblog.xyz (需要配置 Nginx)"
+      # 4. 同步文件到服务器
+      - name: Sync files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: 22
+          source: "bin/wyhblog,config/,templates/,static/"
+          target: "/opt/wyhblog/"
+          strip_components: 0
+          overwrite: true
+
+      # 5. 部署到服务器（关键步骤）
+      - name: Deploy on server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: 22
+          script: |
+            echo "=== 开始部署 wyhblog ==="
+            DEPLOY_DIR="/opt/wyhblog"
+            BINARY_PATH="$DEPLOY_DIR/bin/wyhblog"
+            
+            # 1. 确保目录存在
+            mkdir -p $DEPLOY_DIR/{bin,logs,data}
+            
+            # 2. 备份当前版本（可选）
+            if [ -f "$BINARY_PATH" ]; then
+              TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+              cp "$BINARY_PATH" "$BINARY_PATH.backup-$TIMESTAMP"
+              echo "已备份旧版本"
+            fi
+            
+            # 3. 停止现有进程（改进版）
+            echo "停止现有服务..."
+            # 使用systemd管理（推荐）
+            if systemctl is-active --quiet wyhblog.service 2>/dev/null; then
+              sudo systemctl stop wyhblog.service
+              echo "通过systemd停止服务"
+            else
+              # 备用：查找并终止进程
+              PIDS=$(pgrep -f "wyhblog" || true)
+              if [ ! -z "$PIDS" ]; then
+                echo "找到进程: $PIDS，正在停止..."
+                kill $PIDS 2>/dev/null || true
+                sleep 3
+                # 强制终止仍在运行的进程
+                PIDS_REMAIN=$(pgrep -f "wyhblog" || true)
+                if [ ! -z "$PIDS_REMAIN" ]; then
+                  kill -9 $PIDS_REMAIN 2>/dev/null || true
+                  echo "强制终止进程"
+                fi
+              fi
+            fi
+            
+            # 4. 确保二进制文件可执行
+            chmod +x "$BINARY_PATH"
+            
+            # 5. 启动服务
+            echo "启动新版本..."
+            # 方式A：直接后台运行
+            cd $DEPLOY_DIR
+            nohup $BINARY_PATH > $DEPLOY_DIR/logs/wyhblog.log 2>&1 &
+            
+            # 方式B：或使用systemd（如果已配置）
+            # sudo systemctl start wyhblog.service
+            
+            # 6. 验证部署
+            sleep 5  # 等待应用启动
+            
+            # 检查进程
+            if pgrep -f "wyhblog" >/dev/null; then
+              echo "✓ wyhblog 进程运行正常"
+              # 检查端口监听（假设使用8080端口）
+              if ss -tlnp | grep -q ":8080"; then
+                echo "✓ 端口 8080 监听正常"
+              else
+                echo "⚠ 警告：端口 8080 未监听"
+              fi
+            else
+              echo "✗ 错误：wyhblog 进程未启动"
+              echo "=== 最后50行日志 ==="
+              tail -50 $DEPLOY_DIR/logs/wyhblog.log || true
+              exit 1
+            fi
+            
+            echo "=== 部署完成 ==="
+
+      # 6. 健康检查（可选）
+      - name: Health check
+        run: |
+          echo "等待服务启动..."
+          sleep 10
+          # 测试服务是否响应
+          curl -f http://${{ secrets.SERVER_HOST }}:8080/health || \
+          curl -f http://${{ secrets.SERVER_HOST }}:8080/ || true
