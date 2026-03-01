@@ -22,15 +22,14 @@ jobs:
           CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o ../../wyhblog .
           ls -la ../../wyhblog
 
-      # 新增：打包web文件
+      # 打包web/dist目录的内容（不包含web目录本身）
       - name: Package web files
         run: |
-          # 创建临时目录
-          mkdir -p temp-web
-          # 复制web目录
-          cp -r web temp-web/
-          # 打包web文件
-          tar -czf web.tar.gz -C temp-web .
+          echo "打包web/dist文件..."
+          cd web/dist
+          tar -czf ../../web.tar.gz .
+          cd ../..
+          echo "打包完成:"
           ls -la web.tar.gz
 
       # 上传程序文件
@@ -73,6 +72,7 @@ jobs:
             # 创建基础目录
             mkdir -p $DEPLOY_DIR/logs
             mkdir -p $DEPLOY_DIR/data/posts
+            mkdir -p $DEPLOY_DIR/web/dist
             
             # 检查上传的文件
             echo "检查上传的文件:"
@@ -85,21 +85,22 @@ jobs:
             screen -X -S wyhblog quit 2>/dev/null || true
             sleep 2
 
-            # 更新web文件（完全替换）
+            # 更新web文件
             echo "更新web文件..."
             if [ -f /tmp/web.tar.gz ]; then
-              # 备份当前的web目录（可选）
-              if [ -d "$DEPLOY_DIR/web" ]; then
-                echo "备份当前web目录..."
-                cp -r $DEPLOY_DIR/web $DEPLOY_DIR/web.backup.$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
+              # 备份当前的web/dist目录
+              if [ -d "$DEPLOY_DIR/web/dist" ]; then
+                echo "备份当前web/dist目录..."
+                cp -r $DEPLOY_DIR/web/dist $DEPLOY_DIR/web/dist.backup.$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
               fi
               
-              # 完全删除旧的web目录
-              rm -rf $DEPLOY_DIR/web
-              mkdir -p $DEPLOY_DIR/web
+              # 清空web/dist目录
+              rm -rf $DEPLOY_DIR/web/dist/*
               
-              # 解压新的web文件
-              tar -xzf /tmp/web.tar.gz -C $DEPLOY_DIR/web
+              # 解压新的web文件到web/dist目录
+              echo "解压web文件到 $DEPLOY_DIR/web/dist/"
+              tar -xzf /tmp/web.tar.gz -C $DEPLOY_DIR/web/dist/
+              
               echo "web文件更新完成:"
               ls -la $DEPLOY_DIR/web/dist/
             else
@@ -157,5 +158,6 @@ jobs:
 
             echo "=== 部署完成 ==="
             echo "web文件位置: $DEPLOY_DIR/web/dist/"
+            ls -la $DEPLOY_DIR/web/dist/
             echo "程序文件: $DEPLOY_DIR/wyhblog"
             echo "日志文件: $DEPLOY_DIR/logs/wyhblog.log"
