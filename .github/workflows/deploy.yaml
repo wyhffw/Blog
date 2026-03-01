@@ -24,7 +24,9 @@ jobs:
           echo "当前目录: $(pwd)"
           cd cmd/server
           go build -o ../../wyhblog .
+          echo "编译完成，检查文件:"
           ls -la ../../wyhblog
+          file ../../wyhblog
 
       # 4. 测试SSH连接
       - name: Test SSH connection
@@ -37,6 +39,7 @@ jobs:
           script: |
             echo "✅ SSH连接成功"
             echo "服务器时间: $(date)"
+            echo "当前用户: $(whoami)"
 
       # 5. 上传文件
       - name: Upload binary
@@ -50,7 +53,7 @@ jobs:
           target: "/tmp/"
           overwrite: true
 
-      # 6. 部署运行（使用 systemd）
+      # 6. 部署运行（简化版，使用screen）
       - name: Run on server
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -61,87 +64,46 @@ jobs:
           script: |
             set -e
             echo "=== 开始部署 ==="
-
-            # 1. 检查文件
+            
+            # 创建目录
+            DEPLOY_DIR="/opt/wyhblog"
+            mkdir -p $DEPLOY_DIR/logs
+            mkdir -p $DEPLOY_DIR/data/posts
+            mkdir -p $DEPLOY_DIR/web/dist
+            
+            # 检查文件
             echo "检查上传的文件:"
             ls -la /tmp/wyhblog
-            file /tmp/wyhblog
-
-            # 2. 创建目录
-            DEPLOY_DIR="/opt/wyhblog"
-            sudo mkdir -p $DEPLOY_DIR/logs
-            sudo mkdir -p $DEPLOY_DIR/data/posts
-            sudo mkdir -p $DEPLOY_DIR/web/dist
-
-            # 3. 停止服务
-            echo "停止服务..."
-            sudo systemctl stop wyhblog 2>/dev/null || echo "服务未运行"
-
-            # 4. 备份旧版本
-            if [ -f "$DEPLOY_DIR/wyhblog" ]; then
-              echo "备份旧版本..."
-              sudo cp $DEPLOY_DIR/wyhblog $DEPLOY_DIR/wyhblog.backup.$(date +%Y%m%d_%H%M%S)
-            fi
-
-            # 5. 安装新版本
-            echo "安装新版本..."
-            sudo mv /tmp/wyhblog $DEPLOY_DIR/
-            sudo chmod +x $DEPLOY_DIR/wyhblog
-            sudo chown -R root:root $DEPLOY_DIR
-
-            # 6. 创建/更新服务文件
-            echo "更新服务配置..."
-            sudo tee /etc/systemd/system/wyhblog.service > /dev/null << 'EOF'
-            [Unit]
-            Description=wyhblog Service
-            After=network.target
-
-            [Service]
-            Type=simple
-            User=root
-            WorkingDirectory=/opt/wyhblog
-            Environment="DATA_DIR=/opt/wyhblog/data/posts"
-            Environment="PUBLIC_DIR=/opt/wyhblog/web/dist"
-            Environment="ADMIN_USER=admin"
-            Environment="ADMIN_PASS=admin123"
-            ExecStart=/opt/wyhblog/wyhblog
-            Restart=always
-            RestartSec=10
-            StandardOutput=append:/opt/wyhblog/logs/wyhblog.log
-            StandardError=append:/opt/wyhblog/logs/wyhblog.log
-
-            [Install]
-            WantedBy=multi-user.target
-            EOF
-
-            # 7. 重新加载 systemd
-            echo "重新加载 systemd..."
-            sudo systemctl daemon-reload
-
-            # 8. 启动服务
-            echo "启动服务..."
-            sudo systemctl enable wyhblog
-            sudo systemctl start wyhblog
-
-            # 9. 检查服务状态
-            echo "检查服务状态..."
-            sleep 3
             
-            # 10. 验证
-            if sudo systemctl is-active --quiet wyhblog; then
-              echo "✅ 服务启动成功！"
-              echo "服务状态:"
-              sudo systemctl status wyhblog --no-pager
-              echo ""
-              echo "查看日志: sudo journalctl -u wyhblog -f"
-              echo "或: tail -f /opt/wyhblog/logs/wyhblog.log"
+            # 停止旧进程
+            echo "停止旧进程..."
+            pkill -f wyhblog 2>/dev/null || true
+            screen -X -S wyhblog quit 2>/dev/null || true
+            sleep 2
+            
+            # 安装新版本
+            echo "安装新版本..."
+            mv /tmp/wyhblog $DEPLOY_DIR/
+            chmod +x $DEPLOY_DIR/wyhblog
+            
+            # 启动程序
+            echo "启动程序..."
+            cd $DEPLOY_DIR
+            
+            # 使用 screen 运行
+            screen -dmS wyhblog bash -c "cd $DEPLOY_DIR && ./wyhblog > logs/wyhblog.log 2>&1"
+            
+            # 验证
+            sleep 3
+            if pgrep -f wyhblog >/dev/null; then
+              PID=$(pgrep -f wyhblog)
+              echo "✅ 启动成功！PID: $PID"
+              echo "查看日志: tail -f $DEPLOY_DIR/logs/wyhblog.log"
             else
-              echo "❌ 服务启动失败！"
-              echo "服务状态:"
-              sudo systemctl status wyhblog --no-pager
-              echo ""
-              echo "查看日志: sudo journalctl -u wyhblog -n 50 --no-pager"
+              echo "❌ 启动失败！"
+              echo "日志:"
+              tail -20 $DEPLOY_DIR/logs/wyhblog.log 2>/dev/null || echo "无日志"
               exit 1
             fi
-
+            
             echo "=== 部署完成 ==="
