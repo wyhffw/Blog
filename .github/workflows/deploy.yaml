@@ -8,41 +8,20 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      # 1. 拉取代码
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # 2. 设置Go
       - name: Setup Go
         uses: actions/setup-go@v4
         with:
           go-version: '1.21'
 
-      # 3. 编译（静态编译）
       - name: Build binary
         run: |
-          echo "当前目录: $(pwd)"
           cd cmd/server
-          echo "使用静态编译..."
           CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o ../../wyhblog .
-          echo "编译完成，检查文件:"
           ls -la ../../wyhblog
-          file ../../wyhblog
 
-      # 4. 测试SSH连接
-      - name: Test SSH connection
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_PORT }}
-          script: |
-            echo "✅ SSH连接成功"
-            echo "服务器时间: $(date)"
-            echo "当前用户: $(whoami)"
-
-      # 5. 上传文件
       - name: Upload binary
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -54,7 +33,6 @@ jobs:
           target: "/tmp/"
           overwrite: true
 
-      # 6. 部署运行（完整版）
       - name: Run on server
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -65,110 +43,57 @@ jobs:
           script: |
             set -e
             echo "=== 开始部署 ==="
-            
-            # 安装必要的工具
-            echo "检查并安装必要工具..."
-            if ! command -v screen &> /dev/null; then
-              echo "正在安装 screen..."
-              if command -v yum &> /dev/null; then
-                sudo yum install -y screen
-              elif command -v apt-get &> /dev/null; then
-                sudo apt-get update && sudo apt-get install -y screen
-              else
-                echo "⚠️ 无法安装 screen，将使用 nohup"
-              fi
-            else
-              echo "✅ screen 已安装"
-            fi
-            
+
             # 创建目录
             DEPLOY_DIR="/opt/wyhblog"
-            echo "创建目录: $DEPLOY_DIR"
             mkdir -p $DEPLOY_DIR/logs
             mkdir -p $DEPLOY_DIR/data/posts
             mkdir -p $DEPLOY_DIR/web/dist
-            
-            # 检查上传的文件
+
+            # 检查文件
             echo "检查上传的文件:"
             ls -la /tmp/wyhblog
-            file /tmp/wyhblog
-            
-            # 停止旧进程
+
+            # 停止旧进程（更精确的方式）
             echo "停止旧进程..."
-            pkill -f wyhblog 2>/dev/null || echo "没有运行的进程"
+            # 只杀死 /opt/wyhblog/wyhblog 进程，不杀其他
+            ps aux | grep "/opt/wyhblog/wyhblog" | grep -v grep | awk '{print $2}' | xargs -r kill -9
             screen -X -S wyhblog quit 2>/dev/null || true
-            sleep 3
-            
-            # 清理旧文件
-            echo "清理旧文件..."
-            cd $DEPLOY_DIR
-            rm -f wyhblog wyhblog-backup-* 2>/dev/null || true
-            
+            sleep 2
+
             # 安装新版本
             echo "安装新版本..."
             cp /tmp/wyhblog $DEPLOY_DIR/
             chmod +x $DEPLOY_DIR/wyhblog
-            
-            # 检查编译方式
-            echo "检查编译方式:"
-            if ldd $DEPLOY_DIR/wyhblog 2>&1 | grep -q "not a dynamic executable"; then
-              echo "✅ 静态编译程序"
-            else
-              echo "⚠️ 动态编译程序"
-            fi
-            
-            # 设置环境变量
-            export DATA_DIR="$DEPLOY_DIR/data/posts"
-            export PUBLIC_DIR="$DEPLOY_DIR/web/dist"
-            export ADMIN_USER="admin"
-            export ADMIN_PASS="admin123"
-            
-            # 启动程序
+
+            # 启动程序（使用完整路径）
             echo "启动程序..."
             cd $DEPLOY_DIR
             
-            # 使用多种方式启动确保成功
-            if command -v screen &> /dev/null; then
-              echo "使用 screen 启动..."
-              screen -dmS wyhblog bash -c "cd $DEPLOY_DIR && ./wyhblog > logs/wyhblog.log 2>&1"
-            else
-              echo "使用 nohup 启动..."
-              nohup ./wyhblog > logs/wyhblog.log 2>&1 &
-            fi
-            
+            # 使用 nohup 启动（最可靠）
+            nohup $DEPLOY_DIR/wyhblog > $DEPLOY_DIR/logs/wyhblog.log 2>&1 &
+
             # 等待启动
-            echo "等待服务启动..."
-            sleep 5
-            
-            # 验证进程
-            if pgrep -f wyhblog >/dev/null; then
-              PID=$(pgrep -f wyhblog)
-              echo "✅ 进程启动成功！PID: $PID"
+            sleep 3
+
+            # 验证进程（只检查特定路径的进程）
+            if pgrep -f "$DEPLOY_DIR/wyhblog" >/dev/null; then
+              PID=$(pgrep -f "$DEPLOY_DIR/wyhblog")
+              echo "✅ 启动成功！PID: $PID"
               
               # 检查端口
-              echo "检查端口监听..."
-              sleep 3
-              if netstat -tlnp 2>/dev/null | grep -q ":8080"; then
+              sleep 2
+              if netstat -tlnp 2>/dev/null | grep ":8080" | grep -q "$PID"; then
                 echo "✅ 服务已监听 8080 端口"
-                echo "服务信息:"
-                netstat -tlnp | grep 8080
               else
                 echo "⚠️ 端口未监听，查看日志:"
                 tail -20 $DEPLOY_DIR/logs/wyhblog.log
               fi
             else
-              echo "❌ 进程启动失败！"
-              echo "查看日志:"
-              tail -50 $DEPLOY_DIR/logs/wyhblog.log 2>/dev/null || echo "日志文件不存在"
+              echo "❌ 启动失败！"
+              echo "日志:"
+              tail -50 $DEPLOY_DIR/logs/wyhblog.log
               exit 1
             fi
-            
-            # 显示最终状态
-            echo ""
-            echo "=== 部署状态 ==="
-            echo "进程列表:"
-            ps aux | grep wyhblog | grep -v grep
-            echo ""
-            echo "日志位置: $DEPLOY_DIR/logs/wyhblog.log"
-            echo "查看日志: tail -f $DEPLOY_DIR/logs/wyhblog.log"
+
             echo "=== 部署完成 ==="
