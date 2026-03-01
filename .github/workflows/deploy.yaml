@@ -22,18 +22,39 @@ jobs:
           CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o ../../wyhblog .
           ls -la ../../wyhblog
 
-      - name: Upload binary
+      # 打包所有文件
+      - name: Package all files
+        run: |
+          # 创建部署包目录
+          mkdir -p deploy-package
+          
+          # 复制程序文件
+          cp wyhblog deploy-package/
+          
+          # 复制web目录（包含所有网页文件）
+          cp -r web deploy-package/
+          
+          # 复制其他必要文件（如果有）
+          cp -r data deploy-package/ 2>/dev/null || true
+          
+          # 打包
+          tar -czf deploy.tar.gz -C deploy-package .
+          ls -la deploy.tar.gz
+
+      # 上传打包文件
+      - name: Upload package
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT }}
-          source: "wyhblog"
+          source: "deploy.tar.gz"
           target: "/tmp/"
           overwrite: true
 
-      - name: Run on server
+      # 部署到服务器
+      - name: Deploy to server
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -42,58 +63,58 @@ jobs:
           port: ${{ secrets.SERVER_PORT }}
           script: |
             set -e
-            echo "=== 开始部署 ==="
+            echo "=== 开始全量部署 ==="
 
-            # 创建目录
             DEPLOY_DIR="/opt/wyhblog"
+            
+            # 备份当前版本（可选）
+            if [ -d "$DEPLOY_DIR" ]; then
+              echo "备份当前版本..."
+              BACKUP_DIR="/opt/wyhblog-backup-$(date +%Y%m%d-%H%M%S)"
+              cp -r $DEPLOY_DIR $BACKUP_DIR
+              echo "备份到: $BACKUP_DIR"
+            fi
+            
+            # 停止服务
+            echo "停止服务..."
+            pkill -f wyhblog 2>/dev/null || true
+            sleep 2
+            
+            # 清理旧文件（完全清理）
+            echo "清理旧文件..."
+            rm -rf $DEPLOY_DIR
+            mkdir -p $DEPLOY_DIR
+            
+            # 解压新文件
+            echo "解压新文件..."
+            tar -xzf /tmp/deploy.tar.gz -C $DEPLOY_DIR
+            
+            # 设置权限
+            echo "设置权限..."
+            chmod +x $DEPLOY_DIR/wyhblog
+            chmod -R 755 $DEPLOY_DIR/web
             mkdir -p $DEPLOY_DIR/logs
             mkdir -p $DEPLOY_DIR/data/posts
-            mkdir -p $DEPLOY_DIR/web/dist
-
-            # 检查文件
-            echo "检查上传的文件:"
-            ls -la /tmp/wyhblog
-
-            # 停止旧进程（更精确的方式）
-            echo "停止旧进程..."
-            # 只杀死 /opt/wyhblog/wyhblog 进程，不杀其他
-            ps aux | grep "/opt/wyhblog/wyhblog" | grep -v grep | awk '{print $2}' | xargs -r kill -9
-            screen -X -S wyhblog quit 2>/dev/null || true
-            sleep 2
-
-            # 安装新版本
-            echo "安装新版本..."
-            cp /tmp/wyhblog $DEPLOY_DIR/
-            chmod +x $DEPLOY_DIR/wyhblog
-
-            # 启动程序（使用完整路径）
-            echo "启动程序..."
-            cd $DEPLOY_DIR
             
-            # 使用 nohup 启动（最可靠）
-            nohup $DEPLOY_DIR/wyhblog > $DEPLOY_DIR/logs/wyhblog.log 2>&1 &
-
-            # 等待启动
+            # 启动服务
+            echo "启动服务..."
+            cd $DEPLOY_DIR
+            nohup ./wyhblog > logs/wyhblog.log 2>&1 &
+            
+            # 验证
             sleep 3
-
-            # 验证进程（只检查特定路径的进程）
-            if pgrep -f "$DEPLOY_DIR/wyhblog" >/dev/null; then
-              PID=$(pgrep -f "$DEPLOY_DIR/wyhblog")
-              echo "✅ 启动成功！PID: $PID"
-              
-              # 检查端口
-              sleep 2
-              if netstat -tlnp 2>/dev/null | grep ":8080" | grep -q "$PID"; then
-                echo "✅ 服务已监听 8080 端口"
-              else
-                echo "⚠️ 端口未监听，查看日志:"
-                tail -20 $DEPLOY_DIR/logs/wyhblog.log
-              fi
+            if pgrep -f wyhblog >/dev/null; then
+              PID=$(pgrep -f wyhblog)
+              echo "✅ 部署成功！PID: $PID"
+              echo "网页文件已更新:"
+              ls -la $DEPLOY_DIR/web/dist/
             else
-              echo "❌ 启动失败！"
-              echo "日志:"
-              tail -50 $DEPLOY_DIR/logs/wyhblog.log
+              echo "❌ 部署失败！"
+              tail -20 $DEPLOY_DIR/logs/wyhblog.log
               exit 1
             fi
-
+            
+            # 清理临时文件
+            rm -f /tmp/deploy.tar.gz
+            
             echo "=== 部署完成 ==="
