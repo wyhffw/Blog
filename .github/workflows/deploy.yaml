@@ -18,7 +18,7 @@ jobs:
         with:
           go-version: '1.21'
 
-      # 3. 编译（静态编译，兼容旧版Linux）
+      # 3. 编译（静态编译）
       - name: Build binary
         run: |
           echo "当前目录: $(pwd)"
@@ -28,8 +28,6 @@ jobs:
           echo "编译完成，检查文件:"
           ls -la ../../wyhblog
           file ../../wyhblog
-          # 检查是否静态编译
-          ldd ../../wyhblog 2>&1 | grep "not a dynamic executable" && echo "✅ 静态编译成功" || echo "⚠️ 警告：可能是动态编译"
 
       # 4. 测试SSH连接
       - name: Test SSH connection
@@ -43,7 +41,6 @@ jobs:
             echo "✅ SSH连接成功"
             echo "服务器时间: $(date)"
             echo "当前用户: $(whoami)"
-            echo "系统信息: $(cat /etc/os-release | grep PRETTY_NAME)"
 
       # 5. 上传文件
       - name: Upload binary
@@ -57,7 +54,7 @@ jobs:
           target: "/tmp/"
           overwrite: true
 
-      # 6. 部署运行
+      # 6. 部署运行（完整版）
       - name: Run on server
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -69,8 +66,24 @@ jobs:
             set -e
             echo "=== 开始部署 ==="
             
+            # 安装必要的工具
+            echo "检查并安装必要工具..."
+            if ! command -v screen &> /dev/null; then
+              echo "正在安装 screen..."
+              if command -v yum &> /dev/null; then
+                sudo yum install -y screen
+              elif command -v apt-get &> /dev/null; then
+                sudo apt-get update && sudo apt-get install -y screen
+              else
+                echo "⚠️ 无法安装 screen，将使用 nohup"
+              fi
+            else
+              echo "✅ screen 已安装"
+            fi
+            
             # 创建目录
             DEPLOY_DIR="/opt/wyhblog"
+            echo "创建目录: $DEPLOY_DIR"
             mkdir -p $DEPLOY_DIR/logs
             mkdir -p $DEPLOY_DIR/data/posts
             mkdir -p $DEPLOY_DIR/web/dist
@@ -82,11 +95,11 @@ jobs:
             
             # 停止旧进程
             echo "停止旧进程..."
-            pkill -f wyhblog 2>/dev/null || true
+            pkill -f wyhblog 2>/dev/null || echo "没有运行的进程"
             screen -X -S wyhblog quit 2>/dev/null || true
-            sleep 2
+            sleep 3
             
-            # 清理旧文件（保留data和logs）
+            # 清理旧文件
             echo "清理旧文件..."
             cd $DEPLOY_DIR
             rm -f wyhblog wyhblog-backup-* 2>/dev/null || true
@@ -96,38 +109,66 @@ jobs:
             cp /tmp/wyhblog $DEPLOY_DIR/
             chmod +x $DEPLOY_DIR/wyhblog
             
-            # 检查是否静态编译（可选）
+            # 检查编译方式
             echo "检查编译方式:"
-            ldd $DEPLOY_DIR/wyhblog 2>&1 | head -3 || echo "✅ 静态编译程序"
+            if ldd $DEPLOY_DIR/wyhblog 2>&1 | grep -q "not a dynamic executable"; then
+              echo "✅ 静态编译程序"
+            else
+              echo "⚠️ 动态编译程序"
+            fi
+            
+            # 设置环境变量
+            export DATA_DIR="$DEPLOY_DIR/data/posts"
+            export PUBLIC_DIR="$DEPLOY_DIR/web/dist"
+            export ADMIN_USER="admin"
+            export ADMIN_PASS="admin123"
             
             # 启动程序
             echo "启动程序..."
             cd $DEPLOY_DIR
             
-            # 使用 screen 运行
-            screen -dmS wyhblog bash -c "cd $DEPLOY_DIR && ./wyhblog > logs/wyhblog.log 2>&1"
+            # 使用多种方式启动确保成功
+            if command -v screen &> /dev/null; then
+              echo "使用 screen 启动..."
+              screen -dmS wyhblog bash -c "cd $DEPLOY_DIR && ./wyhblog > logs/wyhblog.log 2>&1"
+            else
+              echo "使用 nohup 启动..."
+              nohup ./wyhblog > logs/wyhblog.log 2>&1 &
+            fi
             
-            # 验证
-            sleep 3
+            # 等待启动
+            echo "等待服务启动..."
+            sleep 5
+            
+            # 验证进程
             if pgrep -f wyhblog >/dev/null; then
               PID=$(pgrep -f wyhblog)
-              echo "✅ 启动成功！PID: $PID"
-              echo "查看日志: tail -f $DEPLOY_DIR/logs/wyhblog.log"
+              echo "✅ 进程启动成功！PID: $PID"
               
               # 检查端口
-              sleep 2
+              echo "检查端口监听..."
+              sleep 3
               if netstat -tlnp 2>/dev/null | grep -q ":8080"; then
                 echo "✅ 服务已监听 8080 端口"
+                echo "服务信息:"
+                netstat -tlnp | grep 8080
               else
-                echo "⚠️ 等待端口监听..."
-                sleep 3
-                netstat -tlnp | grep 8080 || echo "端口未监听，请检查日志"
+                echo "⚠️ 端口未监听，查看日志:"
+                tail -20 $DEPLOY_DIR/logs/wyhblog.log
               fi
             else
-              echo "❌ 启动失败！"
-              echo "日志:"
-              tail -20 $DEPLOY_DIR/logs/wyhblog.log 2>/dev/null || echo "无日志"
+              echo "❌ 进程启动失败！"
+              echo "查看日志:"
+              tail -50 $DEPLOY_DIR/logs/wyhblog.log 2>/dev/null || echo "日志文件不存在"
               exit 1
             fi
             
+            # 显示最终状态
+            echo ""
+            echo "=== 部署状态 ==="
+            echo "进程列表:"
+            ps aux | grep wyhblog | grep -v grep
+            echo ""
+            echo "日志位置: $DEPLOY_DIR/logs/wyhblog.log"
+            echo "查看日志: tail -f $DEPLOY_DIR/logs/wyhblog.log"
             echo "=== 部署完成 ==="
