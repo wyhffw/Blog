@@ -22,39 +22,42 @@ jobs:
           CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o ../../wyhblog .
           ls -la ../../wyhblog
 
-      # 打包所有文件
-      - name: Package all files
+      # 新增：打包web文件
+      - name: Package web files
         run: |
-          # 创建部署包目录
-          mkdir -p deploy-package
-          
-          # 复制程序文件
-          cp wyhblog deploy-package/
-          
-          # 复制web目录（包含所有网页文件）
-          cp -r web deploy-package/
-          
-          # 复制其他必要文件（如果有）
-          cp -r data deploy-package/ 2>/dev/null || true
-          
-          # 打包
-          tar -czf deploy.tar.gz -C deploy-package .
-          ls -la deploy.tar.gz
+          # 创建临时目录
+          mkdir -p temp-web
+          # 复制web目录
+          cp -r web temp-web/
+          # 打包web文件
+          tar -czf web.tar.gz -C temp-web .
+          ls -la web.tar.gz
 
-      # 上传打包文件
-      - name: Upload package
+      # 上传程序文件
+      - name: Upload binary
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT }}
-          source: "deploy.tar.gz"
+          source: "wyhblog"
           target: "/tmp/"
           overwrite: true
 
-      # 部署到服务器
-      - name: Deploy to server
+      # 上传web文件
+      - name: Upload web files
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT }}
+          source: "web.tar.gz"
+          target: "/tmp/"
+          overwrite: true
+
+      - name: Run on server
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -67,54 +70,92 @@ jobs:
 
             DEPLOY_DIR="/opt/wyhblog"
             
-            # 备份当前版本（可选）
-            if [ -d "$DEPLOY_DIR" ]; then
-              echo "备份当前版本..."
-              BACKUP_DIR="/opt/wyhblog-backup-$(date +%Y%m%d-%H%M%S)"
-              cp -r $DEPLOY_DIR $BACKUP_DIR
-              echo "备份到: $BACKUP_DIR"
-            fi
-            
-            # 停止服务
-            echo "停止服务..."
-            pkill -f wyhblog 2>/dev/null || true
-            sleep 2
-            
-            # 清理旧文件（完全清理）
-            echo "清理旧文件..."
-            rm -rf $DEPLOY_DIR
-            mkdir -p $DEPLOY_DIR
-            
-            # 解压新文件
-            echo "解压新文件..."
-            tar -xzf /tmp/deploy.tar.gz -C $DEPLOY_DIR
-            
-            # 设置权限
-            echo "设置权限..."
-            chmod +x $DEPLOY_DIR/wyhblog
-            chmod -R 755 $DEPLOY_DIR/web
+            # 创建基础目录
             mkdir -p $DEPLOY_DIR/logs
             mkdir -p $DEPLOY_DIR/data/posts
             
-            # 启动服务
-            echo "启动服务..."
-            cd $DEPLOY_DIR
-            nohup ./wyhblog > logs/wyhblog.log 2>&1 &
-            
-            # 验证
-            sleep 3
-            if pgrep -f wyhblog >/dev/null; then
-              PID=$(pgrep -f wyhblog)
-              echo "✅ 部署成功！PID: $PID"
-              echo "网页文件已更新:"
+            # 检查上传的文件
+            echo "检查上传的文件:"
+            ls -la /tmp/wyhblog
+            ls -la /tmp/web.tar.gz
+
+            # 停止旧进程
+            echo "停止旧进程..."
+            ps aux | grep "/opt/wyhblog/wyhblog" | grep -v grep | awk '{print $2}' | xargs -r kill -9
+            screen -X -S wyhblog quit 2>/dev/null || true
+            sleep 2
+
+            # 更新web文件（完全替换）
+            echo "更新web文件..."
+            if [ -f /tmp/web.tar.gz ]; then
+              # 备份当前的web目录（可选）
+              if [ -d "$DEPLOY_DIR/web" ]; then
+                echo "备份当前web目录..."
+                cp -r $DEPLOY_DIR/web $DEPLOY_DIR/web.backup.$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
+              fi
+              
+              # 完全删除旧的web目录
+              rm -rf $DEPLOY_DIR/web
+              mkdir -p $DEPLOY_DIR/web
+              
+              # 解压新的web文件
+              tar -xzf /tmp/web.tar.gz -C $DEPLOY_DIR/web
+              echo "web文件更新完成:"
               ls -la $DEPLOY_DIR/web/dist/
             else
-              echo "❌ 部署失败！"
-              tail -20 $DEPLOY_DIR/logs/wyhblog.log
+              echo "⚠️ web.tar.gz 文件不存在，跳过web更新"
+            fi
+
+            # 更新程序文件
+            echo "更新程序文件..."
+            if [ -f /tmp/wyhblog ]; then
+              # 备份当前程序
+              if [ -f "$DEPLOY_DIR/wyhblog" ]; then
+                cp $DEPLOY_DIR/wyhblog $DEPLOY_DIR/wyhblog.backup.$(date +%Y%m%d-%H%M%S)
+              fi
+              
+              # 复制新程序
+              cp /tmp/wyhblog $DEPLOY_DIR/
+              chmod +x $DEPLOY_DIR/wyhblog
+              echo "程序文件更新完成"
+            else
+              echo "❌ wyhblog 文件不存在！"
               exit 1
             fi
-            
+
+            # 启动程序
+            echo "启动程序..."
+            cd $DEPLOY_DIR
+            nohup $DEPLOY_DIR/wyhblog > $DEPLOY_DIR/logs/wyhblog.log 2>&1 &
+
+            # 等待启动
+            sleep 3
+
+            # 验证进程
+            if pgrep -f "$DEPLOY_DIR/wyhblog" >/dev/null; then
+              PID=$(pgrep -f "$DEPLOY_DIR/wyhblog")
+              echo "✅ 启动成功！PID: $PID"
+              
+              # 检查端口
+              sleep 2
+              if netstat -tlnp 2>/dev/null | grep ":8080" | grep -q "$PID"; then
+                echo "✅ 服务已监听 8080 端口"
+              else
+                echo "⚠️ 端口未监听，查看日志:"
+                tail -20 $DEPLOY_DIR/logs/wyhblog.log
+              fi
+            else
+              echo "❌ 启动失败！"
+              echo "日志:"
+              tail -50 $DEPLOY_DIR/logs/wyhblog.log
+              exit 1
+            fi
+
             # 清理临时文件
-            rm -f /tmp/deploy.tar.gz
-            
+            rm -f /tmp/web.tar.gz
+            echo "临时文件已清理"
+
             echo "=== 部署完成 ==="
+            echo "web文件位置: $DEPLOY_DIR/web/dist/"
+            echo "程序文件: $DEPLOY_DIR/wyhblog"
+            echo "日志文件: $DEPLOY_DIR/logs/wyhblog.log"
