@@ -18,15 +18,18 @@ jobs:
         with:
           go-version: '1.21'
 
-      # 3. 编译
+      # 3. 编译（静态编译，兼容旧版Linux）
       - name: Build binary
         run: |
           echo "当前目录: $(pwd)"
           cd cmd/server
-          go build -o ../../wyhblog .
+          echo "使用静态编译..."
+          CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o ../../wyhblog .
           echo "编译完成，检查文件:"
           ls -la ../../wyhblog
           file ../../wyhblog
+          # 检查是否静态编译
+          ldd ../../wyhblog 2>&1 | grep "not a dynamic executable" && echo "✅ 静态编译成功" || echo "⚠️ 警告：可能是动态编译"
 
       # 4. 测试SSH连接
       - name: Test SSH connection
@@ -40,6 +43,7 @@ jobs:
             echo "✅ SSH连接成功"
             echo "服务器时间: $(date)"
             echo "当前用户: $(whoami)"
+            echo "系统信息: $(cat /etc/os-release | grep PRETTY_NAME)"
 
       # 5. 上传文件
       - name: Upload binary
@@ -53,7 +57,7 @@ jobs:
           target: "/tmp/"
           overwrite: true
 
-      # 6. 部署运行（简化版，使用screen）
+      # 6. 部署运行
       - name: Run on server
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -71,9 +75,10 @@ jobs:
             mkdir -p $DEPLOY_DIR/data/posts
             mkdir -p $DEPLOY_DIR/web/dist
             
-            # 检查文件
+            # 检查上传的文件
             echo "检查上传的文件:"
             ls -la /tmp/wyhblog
+            file /tmp/wyhblog
             
             # 停止旧进程
             echo "停止旧进程..."
@@ -81,10 +86,19 @@ jobs:
             screen -X -S wyhblog quit 2>/dev/null || true
             sleep 2
             
+            # 清理旧文件（保留data和logs）
+            echo "清理旧文件..."
+            cd $DEPLOY_DIR
+            rm -f wyhblog wyhblog-backup-* 2>/dev/null || true
+            
             # 安装新版本
             echo "安装新版本..."
-            mv /tmp/wyhblog $DEPLOY_DIR/
+            cp /tmp/wyhblog $DEPLOY_DIR/
             chmod +x $DEPLOY_DIR/wyhblog
+            
+            # 检查是否静态编译（可选）
+            echo "检查编译方式:"
+            ldd $DEPLOY_DIR/wyhblog 2>&1 | head -3 || echo "✅ 静态编译程序"
             
             # 启动程序
             echo "启动程序..."
@@ -99,6 +113,16 @@ jobs:
               PID=$(pgrep -f wyhblog)
               echo "✅ 启动成功！PID: $PID"
               echo "查看日志: tail -f $DEPLOY_DIR/logs/wyhblog.log"
+              
+              # 检查端口
+              sleep 2
+              if netstat -tlnp 2>/dev/null | grep -q ":8080"; then
+                echo "✅ 服务已监听 8080 端口"
+              else
+                echo "⚠️ 等待端口监听..."
+                sleep 3
+                netstat -tlnp | grep 8080 || echo "端口未监听，请检查日志"
+              fi
             else
               echo "❌ 启动失败！"
               echo "日志:"
